@@ -172,4 +172,10 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_draw", "Disegno"),
     ("tray_open", "Apri"),
     ("tray_quit", "Esci"),
+    ("close_to_tray", "Chiudi nell'area di notifica"),
+    (
+        "close_to_tray_hint",
+        "Chiudendo la finestra, questa si nasconde nell'area di notifica e il tracciamento continua. Disattiva per uscire.",
+    ),
+    ("tray_pause", "Pausa"),
 ];

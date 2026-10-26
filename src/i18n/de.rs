@@ -172,4 +172,10 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_draw", "Zeichnen"),
     ("tray_open", "Öffnen"),
     ("tray_quit", "Beenden"),
+    ("close_to_tray", "Beim Schließen in Tray"),
+    (
+        "close_to_tray_hint",
+        "Beim Schließen wird das Fenster im Infobereich versteckt und das Tracking läuft weiter. Ausschalten, um zu beenden.",
+    ),
+    ("tray_pause", "Pause"),
 ];

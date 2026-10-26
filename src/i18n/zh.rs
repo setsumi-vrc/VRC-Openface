@@ -151,4 +151,7 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_draw", "绘制"),
     ("tray_open", "打开"),
     ("tray_quit", "退出"),
+    ("close_to_tray", "关闭到托盘"),
+    ("close_to_tray_hint", "关闭窗口时隐藏到系统托盘，追踪继续运行。关闭此项则直接退出。"),
+    ("tray_pause", "暂停"),
 ];

@@ -1,5 +1,6 @@
-//! System tray icon. Closing the window hides it there while tracking and OSC keep running;
-//! "Quit" in the tray menu closes the app. Windows only: other platforms have no tray.
+//! System tray icon. Closing the window hides it there (when enabled in the settings) while
+//! tracking and OSC keep running. "Pause" stops sending tracking, like the FT switch, and
+//! "Quit" closes the app. Windows only: other platforms have no tray.
 
 #[cfg(windows)]
 pub use imp::Tray;
@@ -14,7 +15,7 @@ mod imp {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+    use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
     use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -22,11 +23,13 @@ mod imp {
     };
 
     use crate::i18n::{Language, tr};
+    use crate::tracker::Shared;
 
     pub struct Tray {
         // Dropping the icon removes it from the tray.
         _icon: TrayIcon,
         open: MenuItem,
+        pause: CheckMenuItem,
         quit: MenuItem,
         language: Language,
         hwnd: isize,
@@ -49,7 +52,7 @@ mod imp {
     }
 
     impl Tray {
-        pub fn new(cc: &eframe::CreationContext<'_>, language: Language) -> Option<Self> {
+        pub fn new(cc: &eframe::CreationContext<'_>, language: Language, shared: Arc<Shared>) -> Option<Self> {
             let hwnd = match cc.window_handle().ok()?.as_raw() {
                 RawWindowHandle::Win32(window) => window.hwnd.get(),
                 _ => return None,
@@ -57,8 +60,10 @@ mod imp {
             let image = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok()?;
             let icon = Icon::from_rgba(image.rgba, image.width, image.height).ok()?;
             let open = MenuItem::new(tr(language, "tray_open"), true, None);
+            let paused = !shared.settings.read().ft_output;
+            let pause = CheckMenuItem::new(tr(language, "tray_pause"), true, paused, None);
             let quit = MenuItem::new(tr(language, "tray_quit"), true, None);
-            let menu = Menu::with_items(&[&open, &PredefinedMenuItem::separator(), &quit]).ok()?;
+            let menu = Menu::with_items(&[&open, &pause, &PredefinedMenuItem::separator(), &quit]).ok()?;
             let tray = TrayIconBuilder::new()
                 .with_icon(icon)
                 .with_tooltip("VRC Openface")
@@ -78,11 +83,23 @@ mod imp {
                     show(hwnd, &tray_ctx);
                 }
             }));
-            let (open_id, quit_id) = (open.id().clone(), quit.id().clone());
+            let (open_id, pause_id, quit_id) = (open.id().clone(), pause.id().clone(), quit.id().clone());
             let quit_flag = quitting.clone();
             MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
                 if event.id == open_id {
                     show(hwnd, &ctx);
+                } else if event.id == pause_id {
+                    // The menu flips its own check mark; the window may be hidden, so the
+                    // setting is changed and saved here instead of by the UI.
+                    let settings = {
+                        let mut settings = shared.settings.write();
+                        settings.ft_output = !settings.ft_output;
+                        settings.clone()
+                    };
+                    if let Err(e) = settings.save() {
+                        log::warn!("saving settings: {e:#}");
+                    }
+                    ctx.request_repaint();
                 } else if event.id == quit_id {
                     // The window is shown first so its loop is running to handle the close.
                     quit_flag.store(true, Ordering::Relaxed);
@@ -90,7 +107,7 @@ mod imp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             }));
-            Some(Self { _icon: tray, open, quit, language, hwnd, quitting })
+            Some(Self { _icon: tray, open, pause, quit, language, hwnd, quitting })
         }
 
         /// Keeps the menu text in the interface language.
@@ -98,7 +115,15 @@ mod imp {
             if self.language != language {
                 self.language = language;
                 self.open.set_text(tr(language, "tray_open"));
+                self.pause.set_text(tr(language, "tray_pause"));
                 self.quit.set_text(tr(language, "tray_quit"));
+            }
+        }
+
+        /// Mirrors the FT switch in the menu's check mark.
+        pub fn set_paused(&self, paused: bool) {
+            if self.pause.is_checked() != paused {
+                self.pause.set_checked(paused);
             }
         }
 
@@ -121,17 +146,22 @@ mod imp {
 
 #[cfg(not(windows))]
 mod stub {
+    use std::sync::Arc;
+
     use crate::i18n::Language;
+    use crate::tracker::Shared;
 
     /// No tray on this platform; the app behaves as before.
     pub struct Tray;
 
     impl Tray {
-        pub fn new(_cc: &eframe::CreationContext<'_>, _language: Language) -> Option<Self> {
+        pub fn new(_cc: &eframe::CreationContext<'_>, _language: Language, _shared: Arc<Shared>) -> Option<Self> {
             None
         }
 
         pub fn set_language(&mut self, _language: Language) {}
+
+        pub fn set_paused(&self, _paused: bool) {}
 
         pub fn quitting(&self) -> bool {
             false

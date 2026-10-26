@@ -26,6 +26,8 @@ pub const IDLE_MINUTES: [u32; 7] = [1, 2, 5, 10, 15, 30, 60];
 pub struct Settings {
     /// "FT" switch: send tracking to VRChat. Off sends a neutral face.
     pub ft_output: bool,
+    /// Closing the window hides it in the system tray instead of quitting.
+    pub close_to_tray: bool,
     pub camera_index: u32,
     pub resolution: (u32, u32),
     pub camera_fps: u32,
@@ -61,6 +63,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             ft_output: true,
+            close_to_tray: true,
             camera_index: 0,
             resolution: (640, 480),
             camera_fps: 30,

@@ -103,7 +103,9 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
   rects (min > max) make `clamp` panic.
 - `tray.rs` (Windows only, `tray-icon`): closing the window is cancelled and the window hidden
   with Win32 `ShowWindow`; the tray handlers show it again the same way, because a hidden window
-  may not run the egui loop. Quit sets `quitting` so the close goes through. While hidden,
+  may not run the egui loop. Quit sets `quitting` so the close goes through. The Pause check item toggles
+  `Settings::ft_output` and saves it in the handler (the UI may not be running); the UI mirrors
+  the setting back into the check mark. `Settings::close_to_tray` decides whether close is cancelled. While hidden,
   `ui` returns early with `ui_awake` false.
 - The window icon is `assets/icon.png`; `build.rs` embeds `assets/icon.ico` in the exe
   with `winresource`.

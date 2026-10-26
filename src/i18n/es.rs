@@ -175,4 +175,10 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_draw", "Dibujo"),
     ("tray_open", "Abrir"),
     ("tray_quit", "Salir"),
+    ("close_to_tray", "Cerrar a la bandeja"),
+    (
+        "close_to_tray_hint",
+        "Al cerrar la ventana se oculta en la bandeja del sistema y el seguimiento continúa. Desactívalo para salir.",
+    ),
+    ("tray_pause", "Pausar"),
 ];

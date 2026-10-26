@@ -175,4 +175,10 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_draw", "Dessin"),
     ("tray_open", "Ouvrir"),
     ("tray_quit", "Quitter"),
+    ("close_to_tray", "Fermer vers la barre système"),
+    (
+        "close_to_tray_hint",
+        "Fermer la fenêtre la masque dans la barre système et le suivi continue. Désactivez pour quitter.",
+    ),
+    ("tray_pause", "Pause"),
 ];

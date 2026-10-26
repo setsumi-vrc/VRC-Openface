@@ -15,6 +15,9 @@ Versions follow `MAJOR.MINOR.PATCH`:
 ### Added
 - System tray icon (Windows). Closing the window hides it to the tray while tracking and
   OSC keep running; click the icon or choose Open to bring it back, Quit to exit.
+  The "Close to tray" setting turns that off, so closing quits.
+- Pause in the tray menu stops sending tracking, like the FT switch (neutral face, tracking
+  inactive); the check mark follows the FT switch.
 - GitHub and X links next to the title.
 - Seven more interface languages: Spanish, Portuguese, French, German, Italian, Russian and
   Simplified Chinese, next to English, Japanese and Korean.

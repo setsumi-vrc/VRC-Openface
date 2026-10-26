@@ -350,6 +350,14 @@ const TEXT: &[(&str, &str, &str, &str)] = &[
     ("st_upload", "Preview upload", "プレビュー転送", "미리보기 업로드"),
     ("st_tables", "Tables", "表", "표"),
     ("st_draw", "Draw", "描画", "그리기"),
+    ("close_to_tray", "Close to tray", "閉じるでトレイへ", "닫으면 트레이로"),
+    (
+        "close_to_tray_hint",
+        "Closing the window hides it in the system tray and keeps tracking. Turn off to quit instead.",
+        "ウィンドウを閉じるとシステムトレイに隠れ、トラッキングを続けます。オフにすると終了します。",
+        "창을 닫으면 시스템 트레이에 숨고 트래킹이 계속됩니다. 끄면 종료됩니다.",
+    ),
+    ("tray_pause", "Pause", "一時停止", "일시정지"),
     ("tray_open", "Open", "開く", "열기"),
     ("tray_quit", "Quit", "終了", "종료"),
 ];

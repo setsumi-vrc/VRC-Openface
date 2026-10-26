@@ -298,6 +298,7 @@ impl App {
         model_dir: PathBuf,
     ) -> Self {
         let saved = shared.settings.read().clone();
+        let tray = crate::tray::Tray::new(cc, saved.language, shared.clone());
         let language = saved.language;
         load_cjk_fonts(&cc.egui_ctx, language);
         let pal = Palette::of(saved.scheme, &saved.custom_colors);
@@ -339,7 +340,7 @@ impl App {
             narrow: false,
             seen_frame: 0,
             font_language: language,
-            tray: crate::tray::Tray::new(cc, language),
+            tray,
         }
     }
 
@@ -1599,6 +1600,8 @@ impl App {
             self.labeled_switch(ui, &mut s.friendly_names, friendly, None);
             self.labeled_switch(ui, &mut s.interpolation, interp, Some(interp_hint));
             self.labeled_switch(ui, &mut s.send_without_avatar, no_avatar, Some(no_avatar_hint));
+            let (to_tray, to_tray_hint) = (self.t(s, "close_to_tray"), self.t(s, "close_to_tray_hint"));
+            self.labeled_switch(ui, &mut s.close_to_tray, to_tray, Some(to_tray_hint));
             ui.separator();
 
             ui.label(RichText::new(self.t(s, "updates")).strong());
@@ -2204,7 +2207,8 @@ impl eframe::App for App {
 
         if let Some(tray) = &mut self.tray {
             tray.set_language(s.language);
-            if ctx.input(|i| i.viewport().close_requested()) && !tray.quitting() {
+            tray.set_paused(!s.ft_output);
+            if s.close_to_tray && ctx.input(|i| i.viewport().close_requested()) && !tray.quitting() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 tray.hide_window();
             }
