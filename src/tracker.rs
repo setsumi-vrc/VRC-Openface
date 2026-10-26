@@ -20,7 +20,7 @@ use crate::mapping::{Mapper, OUTPUTS};
 use crate::osc::{self, AvatarInfo, Binding};
 use crate::oscquery::SharedDiscovery;
 use crate::output::{Frame, SharedFeed};
-use crate::perf::{Perf, Stage};
+use crate::perf::{FrameTimes, Perf, Stage};
 use crate::processing::{CalibrationStore, CaptureOutcome, Processor};
 use crate::system::{self, GpuAdapter};
 
@@ -57,6 +57,9 @@ pub enum TongueStatus {
 
 #[derive(Clone)]
 pub struct Snapshot {
+    /// Timestamps of the frame behind these values, and a counter that changes with it.
+    pub times: Option<FrameTimes>,
+    pub frame_seq: u64,
     pub status: Status,
     pub tracking_fps: f32,
     pub camera_fps: f32,
@@ -85,6 +88,8 @@ pub struct Snapshot {
 impl Default for Snapshot {
     fn default() -> Self {
         Self {
+            times: None,
+            frame_seq: 0,
             status: Status::Starting,
             tracking_fps: 0.0,
             camera_fps: 0.0,
@@ -329,8 +334,8 @@ impl Tracker {
             }
             if self.last_memory_sample.elapsed() >= Duration::from_secs(5) {
                 self.last_memory_sample = Instant::now();
-                if let Some(bytes) = system::private_memory() {
-                    self.shared.perf.lock().sample_memory(bytes);
+                if let Some(sample) = system::process_memory() {
+                    self.shared.perf.lock().sample_memory(sample);
                 }
             }
             let settings = self.shared.settings.read().clone();
@@ -504,10 +509,17 @@ impl Tracker {
         };
         let captured = Instant::now();
         let perf = self.shared.perf.clone();
-        perf.lock().record(Stage::Camera, ms(read_started));
+        let convert = camera.convert_ms;
+        {
+            let mut p = perf.lock();
+            p.record(Stage::ReadWait, (ms(read_started) - convert).max(0.0));
+            p.record(Stage::Convert, convert);
+        }
         let camera_fps = self.camera_fps.tick();
         if settings.mirror {
+            let started = Instant::now();
             frame.flip_horizontal();
+            perf.lock().record(Stage::Mirror, ms(started));
         }
 
         let timestamp = (self.started.elapsed().as_millis() as u64).max(self.last_timestamp + 1);
@@ -516,7 +528,9 @@ impl Tracker {
         let landmarker = self.landmarker.as_mut().expect("models loaded above");
         let face = landmarker.detect(&frame, timestamp).map_err(|e| Status::ModelError(format!("{e:#}")))?;
         perf.lock().record(Stage::MediaPipe, ms(inference_started));
+        let mediapipe_done = Instant::now();
 
+        let preview_started = Instant::now();
         let preview = settings.show_camera.then(|| {
             self.preview_seq += 1;
             let mut small = frame.downscale_to_width(PREVIEW_MAX_WIDTH);
@@ -525,6 +539,10 @@ impl Tracker {
                 small.blur(small.width / 60 + 2);
             }
             Arc::new(small)
+        });
+        let preview_done = preview.is_some().then(|| {
+            perf.lock().record(Stage::Preview, ms(preview_started));
+            Instant::now()
         });
 
         let Some(face) = face else {
@@ -546,6 +564,7 @@ impl Tracker {
 
         let mut raw = [0.0f32; COUNT];
         raw[..face.blendshapes.len()].copy_from_slice(&face.blendshapes);
+        let mut tongue_done = None;
         if let Some(tongue) = &mut self.tongue {
             let started = Instant::now();
             match tongue.update(&frame, &face.pixel_landmarks) {
@@ -553,6 +572,7 @@ impl Tracker {
                 Err(e) => log::debug!("tongue: {e:#}"),
             }
             perf.lock().record(Stage::Tongue, ms(started));
+            tongue_done = Some(Instant::now());
         }
 
         let processing_started = Instant::now();
@@ -571,12 +591,23 @@ impl Tracker {
                 CaptureOutcome::NeutralRejected => "neutral_rejected",
             });
         }
+        perf.lock().record(Stage::Calibration, ms(processing_started));
+        let mapping_started = Instant::now();
         let outputs = self.mapper.evaluate(&processed.values, processed.gaze);
-        perf.lock().record(Stage::Processing, ms(processing_started));
+        perf.lock().record(Stage::Mapping, ms(mapping_started));
 
+        let handoff_started = Instant::now();
+        let mut times = FrameTimes {
+            captured,
+            mediapipe: mediapipe_done,
+            tongue: tongue_done,
+            preview: preview_done,
+            core: handoff_started,
+            published: handoff_started,
+        };
         {
             let mut feed = self.sources.feed.lock();
-            feed.push(Frame { captured, values: outputs.clone() });
+            feed.push(Frame { captured, times, values: outputs.clone() });
             feed.bindings.clone_from(&self.avatar.bindings);
             feed.flags.clone_from(&self.avatar.flags);
             feed.active = settings.ft_output;
@@ -603,6 +634,11 @@ impl Tracker {
         snapshot.outputs = outputs;
         snapshot.tongue = self.tongue_status.clone();
         snapshot.capture_progress = self.processor.capture_progress();
+        times.published = Instant::now();
+        snapshot.times = Some(times);
+        snapshot.frame_seq += 1;
+        drop(snapshot);
+        perf.lock().record(Stage::Handoff, ms(handoff_started));
         Ok(())
     }
 }

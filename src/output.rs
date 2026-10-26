@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use parking_lot::Mutex;
 
 use crate::osc::{Binding, OscSender};
-use crate::perf::{Perf, Stage};
+use crate::perf::{self, FrameTimes, Path, Perf, Stage};
 use crate::system;
 
 const RATE_HZ: f64 = 100.0;
@@ -20,6 +20,7 @@ const STALE: Duration = Duration::from_millis(500);
 pub struct Frame {
     /// When the camera delivered the frame these values came from.
     pub captured: Instant,
+    pub times: FrameTimes,
     pub values: Vec<f32>,
 }
 
@@ -112,7 +113,7 @@ fn run(feed: &SharedFeed, perf: &Mutex<Perf>) {
                     _ => None,
                 }
             };
-            let first_use = fresh.then(|| f.latest.as_ref().map(|l| l.captured)).flatten();
+            let first_use = fresh.then(|| f.latest.as_ref().map(|l| l.times)).flatten();
             sent_sequence = f.sequence;
             (values, f.bindings.clone(), f.flags.clone(), f.active, first_use)
         };
@@ -120,10 +121,15 @@ fn run(feed: &SharedFeed, perf: &Mutex<Perf>) {
 
         let started = Instant::now();
         let result = sender.send_frame(&bindings, &values, &flags, active);
+        let send_ms = started.elapsed().as_secs_f32() * 1000.0;
         let mut p = perf.lock();
-        p.record(Stage::Osc, started.elapsed().as_secs_f32() * 1000.0);
-        if let Some(captured) = first_use {
-            p.latency.push(captured.elapsed().as_secs_f32() * 1000.0);
+        p.record(Stage::Osc, send_ms);
+        if let Some(times) = first_use {
+            for path in [Path::MediaPipeOsc, Path::TongueOsc] {
+                if let Some(breakdown) = perf::osc_breakdown(&times, path, started, send_ms) {
+                    p.record_path(path, breakdown);
+                }
+            }
         }
         drop(p);
         feed.lock().error = result.err().map(|e| format!("{e:#}"));
@@ -137,8 +143,11 @@ mod tests {
     #[test]
     fn blend_moves_between_frames() {
         let t0 = Instant::now();
-        let a = Frame { captured: t0, values: vec![0.0] };
-        let b = Frame { captured: t0 + Duration::from_millis(40), values: vec![1.0] };
+        let times =
+            |t: Instant| FrameTimes { captured: t, mediapipe: t, tongue: None, preview: None, core: t, published: t };
+        let a = Frame { captured: t0, times: times(t0), values: vec![0.0] };
+        let t1 = t0 + Duration::from_millis(40);
+        let b = Frame { captured: t1, times: times(t1), values: vec![1.0] };
         // Rendering one interval behind: at b.captured + 20 ms we are halfway from a to b.
         let mid = blend(&a, &b, t0 + Duration::from_millis(60));
         assert!((mid[0] - 0.5).abs() < 1e-3);

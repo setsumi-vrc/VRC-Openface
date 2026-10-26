@@ -128,6 +128,8 @@ mod platform {
         width: usize,
         height: usize,
         stride: isize,
+        /// Time the last frame took to copy into an RGB frame, for the debug view.
+        pub convert_ms: f32,
     }
 
     // The source reader is free-threaded; the camera is only used from the tracker thread.
@@ -187,7 +189,7 @@ mod platform {
                     subtype_name(mode.subtype),
                     modes.len()
                 );
-                Ok(Self { source, reader, width: w as usize, height: h as usize, stride })
+                Ok(Self { source, reader, width: w as usize, height: h as usize, stride, convert_ms: 0.0 })
             }
         }
 
@@ -201,7 +203,10 @@ mod platform {
                 }
                 // Stream ticks and format changes arrive without a sample.
                 let Some(sample) = sample else { continue };
-                return unsafe { self.convert(&sample) };
+                let started = std::time::Instant::now();
+                let frame = unsafe { self.convert(&sample) };
+                self.convert_ms = started.elapsed().as_secs_f32() * 1000.0;
+                return frame;
             }
         }
 
@@ -270,6 +275,8 @@ mod platform {
 
     pub struct CameraSource {
         camera: Camera,
+        /// Decoding happens inside `read`; reported as part of the read time.
+        pub convert_ms: f32,
     }
 
     impl CameraSource {
@@ -289,7 +296,7 @@ mod platform {
                     Ok(mut camera) => {
                         camera.open_stream().context("opening camera stream")?;
                         log::info!("camera {index} opened as {}", camera.camera_format());
-                        return Ok(Self { camera });
+                        return Ok(Self { camera, convert_ms: 0.0 });
                     }
                     Err(e) => last_error = Some(e),
                 }

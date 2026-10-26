@@ -20,6 +20,10 @@ Versions follow `MAJOR.MINOR.PATCH`:
   Unified Expressions and Avatar share one column and MediaPipe shows one channel per line.
 
 ### Changed
+- Debug performance shows much more: latency bars per path (MediaPipe → OSC, Tongue → OSC,
+  tables, preview) split into tracker, core, interface and waiting time; a graph of the
+  totals; memory now / change / trend for private bytes and working set; and averages for
+  every stage grouped by camera, tracker, core and interface.
 - The smoothing control is a slider box instead of an editable number.
 - Color scheme is a dropdown, and new installs start with the Custom scheme.
 - Bigger settings and color scheme buttons, with hover highlights.

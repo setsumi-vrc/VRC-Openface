@@ -17,7 +17,7 @@ use crate::config::{self, Device, IDLE_MINUTES, Settings};
 use crate::i18n::{Language, tr};
 use crate::mapping::{Mapper, OUTPUTS};
 use crate::osc::Binding;
-use crate::perf::Stage;
+use crate::perf::{self, Group, Path, Segment, Stage};
 use crate::processing::{self, ChannelCalibration, Source};
 use crate::theme::{CustomColors, Palette, Scheme};
 use crate::tracker::{self, Command, Shared, Snapshot, Status, TongueStatus};
@@ -130,6 +130,8 @@ pub struct App {
     reveal_started: Option<Instant>,
     /// Narrow layout: Unified Expressions above Avatar instead of side by side.
     narrow: bool,
+    /// Last tracker frame counted in the interface latencies.
+    seen_frame: u64,
 }
 
 fn load_png(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<TextureHandle> {
@@ -248,6 +250,10 @@ fn truncated(painter: &egui::Painter, text: String, font: FontId, color: Color32
     painter.layout_job(job)
 }
 
+fn ms_since(started: Instant) -> f32 {
+    started.elapsed().as_secs_f32() * 1000.0
+}
+
 fn mib(bytes: u64) -> String {
     format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
 }
@@ -298,6 +304,7 @@ impl App {
             pulled: None,
             reveal_started: None,
             narrow: false,
+            seen_frame: 0,
         }
     }
 
@@ -435,17 +442,21 @@ impl App {
         Frame::new().fill(self.pal.bg).inner_margin(Margin::same(8))
     }
 
-    fn update_texture(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
-        let Some(frame) = &snapshot.preview else { return };
+    /// Uploads a new preview image; returns whether there was one.
+    fn update_texture(&mut self, ctx: &egui::Context, snapshot: &Snapshot) -> bool {
+        let Some(frame) = &snapshot.preview else { return false };
         if snapshot.preview_seq == self.texture_seq {
-            return;
+            return false;
         }
+        let started = Instant::now();
         self.texture_seq = snapshot.preview_seq;
         let image = ColorImage::from_rgb([frame.width, frame.height], &frame.data);
         match &mut self.texture {
             Some(texture) => texture.set(image, TextureOptions::LINEAR),
             None => self.texture = Some(ctx.load_texture("preview", image, TextureOptions::LINEAR)),
         }
+        self.shared.perf.lock().record(Stage::Upload, ms_since(started));
+        true
     }
 
     fn persist(&mut self) {
@@ -1477,7 +1488,8 @@ impl App {
             let perf = self.shared.perf.lock().clone();
             let avg = |stage: Stage| perf.stages.get(&stage).and_then(|st| st.average(Duration::from_secs(1)));
             let (capture, capture_hint) = (self.t(s, "camera_capture"), self.t(s, "capture_hint"));
-            self.stage_box(ui, capture, avg(Stage::Camera), Some(capture_hint), |ui| {
+            let camera_ms = avg(Stage::ReadWait).map(|read| read + avg(Stage::Convert).unwrap_or(0.0));
+            self.stage_box(ui, capture, camera_ms, Some(capture_hint), |ui| {
                 ui.label(RichText::new("Media Foundation").color(pal.dim));
             });
             self.stage_box(ui, "MediaPipe", avg(Stage::MediaPipe), None, |ui| {
@@ -1710,64 +1722,263 @@ impl App {
         let pal = self.pal;
         let perf = self.shared.perf.lock().clone();
         let mut open = s.debug;
-        let title = self.t(s, "debug_performance");
-        egui::Window::new(title).open(&mut open).default_width(420.0).show(ctx, |ui| {
-            ui.label(RichText::new(self.t(s, "latency")).strong());
-            let latency = perf.latency.average(Duration::from_secs(1)).unwrap_or(0.0);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.t(s, "total_latency")).color(pal.dim));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.label(format!("{latency:.1} ms")));
-            });
-            let points: Vec<(f32, f32)> = perf.latency.history().collect();
-            graph(ui, &pal, &points, 12.0, None);
-            ui.add_space(6.0);
-
-            ui.label(RichText::new(self.t(s, "memory")).strong());
-            let now = Instant::now();
-            let memory: Vec<(f32, f32)> = perf
-                .memory
-                .iter()
-                .map(|(t, b)| (now.duration_since(*t).as_secs_f32(), *b as f32 / (1024.0 * 1024.0)))
-                .collect();
-            let first = memory.first().map(|m| m.1).unwrap_or(0.0);
-            let last = memory.last().map(|m| m.1).unwrap_or(0.0);
-            ui.horizontal(|ui| {
-                ui.label(format!("{last:.0} MiB"));
-                ui.label(RichText::new(format!("{:+.1} MiB", last - first)).color(pal.dim));
-            });
-            graph(ui, &pal, &memory, 600.0, Some(0.0));
-            ui.add_space(6.0);
-
-            ui.label(RichText::new(self.t(s, "averages")).color(pal.dim));
-            egui::Grid::new("stages").num_columns(3).spacing([24.0, 4.0]).show(ui, |ui| {
-                for stage in Stage::ALL {
-                    let key = match stage {
-                        Stage::Camera => "stage_camera",
-                        Stage::MediaPipe => "stage_mediapipe",
-                        Stage::Tongue => "stage_tongue",
-                        Stage::Processing => "stage_processing",
-                        Stage::Osc => "stage_osc",
-                        Stage::Interface => "stage_interface",
-                    };
-                    let series = perf.stages.get(&stage);
-                    let f = |over: u64| {
-                        series
-                            .and_then(|x| x.average(Duration::from_secs(over)))
-                            .map(|v| format!("{v:.2}"))
-                            .unwrap_or_else(|| "—".into())
-                    };
-                    ui.label(self.t(s, key));
-                    ui.label(f(1));
-                    ui.label(f(12));
-                    ui.end_row();
+        let language = s.language;
+        let t = |key: &str| tr(language, key);
+        let (one, twelve) = (Duration::from_secs(1), Duration::from_secs(12));
+        egui::Window::new(t("debug_performance"))
+            .id(egui::Id::unique("debug-performance"))
+            .open(&mut open)
+            .default_width(540.0)
+            .min_width(460.0)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 6.0;
+                // Latency bars: where each frame spends its time on the way to each result.
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t("latency")).strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        for (segment, key) in [
+                            (Segment::Waiting, "perf_waiting"),
+                            (Segment::Work(Group::Interface), "perf_interface"),
+                            (Segment::Work(Group::Core), "perf_core"),
+                            (Segment::Work(Group::Tracker), "perf_tracker"),
+                        ] {
+                            ui.label(RichText::new(t(key)).small());
+                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                            paint_segment(ui.painter(), rect, segment, &pal, None);
+                        }
+                    });
+                });
+                let rows: Vec<(Path, Option<perf::Breakdown>)> =
+                    Path::ALL.iter().map(|p| (*p, perf.paths.get(p).and_then(|series| series.average(one)))).collect();
+                let longest = rows
+                    .iter()
+                    .filter_map(|(_, b)| b.as_ref().map(|b| b.iter().map(|(_, v)| v).sum::<f32>()))
+                    .fold(0.0f32, f32::max);
+                let scale = ((longest / 10.0).ceil() * 10.0).max(30.0);
+                let (label_w, value_w) = (130.0, 64.0);
+                let (axis, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+                let bar_x = |rect: Rect, v: f32| rect.left() + label_w + v / scale * (rect.width() - label_w - value_w);
+                let ticks: Vec<f32> = (0..=(scale / 10.0) as usize).map(|i| i as f32 * 10.0).collect();
+                for &tick in &ticks {
+                    ui.painter().text(
+                        Pos2::new(bar_x(axis, tick), axis.center().y),
+                        Align2::CENTER_CENTER,
+                        format!("{tick:.0}"),
+                        FontId::monospace(10.5),
+                        pal.dim,
+                    );
                 }
+                ui.painter().text(axis.right_center(), Align2::RIGHT_CENTER, "ms", FontId::monospace(10.5), pal.dim);
+                for (path, breakdown) in &rows {
+                    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
+                    let painter = ui.painter_at(row);
+                    let name = t(path.text_key());
+                    painter.text(row.left_center(), Align2::LEFT_CENTER, name, FontId::monospace(11.5), pal.text);
+                    for &tick in &ticks {
+                        painter.vline(bar_x(row, tick), row.y_range(), Stroke::new(1.0, pal.line.gamma_multiply(0.5)));
+                    }
+                    let Some(breakdown) = breakdown else {
+                        painter.text(row.right_center(), Align2::RIGHT_CENTER, "—", FontId::monospace(11.5), pal.dim);
+                        continue;
+                    };
+                    let mut x = bar_x(row, 0.0);
+                    let mut total = 0.0;
+                    for (segment, v) in breakdown {
+                        total += v;
+                        let end = bar_x(row, total);
+                        let rect = Rect::from_x_y_ranges(x..=end, row.top() + 3.0..=row.bottom() - 3.0);
+                        if rect.width() >= 0.5 {
+                            paint_segment(&painter, rect, *segment, &pal, Some(t("perf_queue")));
+                        }
+                        x = end;
+                    }
+                    let text = format!("{total:.1} ms");
+                    painter.text(row.right_center(), Align2::RIGHT_CENTER, text, FontId::monospace(11.5), pal.text);
+                }
+                ui.separator();
+
+                // Totals over time.
+                let history = |path: Path| -> Vec<(f32, f32)> {
+                    perf.paths.get(&path).map(|series| series.total.history().collect()).unwrap_or_default()
+                };
+                let osc = perf.paths.get(&Path::MediaPipeOsc).and_then(|series| series.total.average(twelve));
+                ui.horizontal(|ui| {
+                    ui.label(t("total_latency"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(osc.map(|v| format!("{v:.0} ms")).unwrap_or_else(|| "—".into()));
+                    });
+                });
+                let lines = [
+                    (history(Path::MediaPipeOsc), group_color(Group::Core), false, "OSC"),
+                    (history(Path::Tables), group_color(Group::Interface), false, t("path_tables")),
+                    (history(Path::Preview), pal.text, true, t("path_preview")),
+                ];
+                multi_graph(ui, &pal, &lines, 12.0);
+                ui.horizontal(|ui| {
+                    for (_, color, dashed, name) in &lines {
+                        let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 10.0), Sense::hover());
+                        let points = [rect.left_center(), rect.right_center()];
+                        if *dashed {
+                            ui.painter().extend(Shape::dashed_line(&points, Stroke::new(1.5, *color), 3.0, 2.0));
+                        } else {
+                            ui.painter().line_segment(points, Stroke::new(1.5, *color));
+                        }
+                        ui.label(RichText::new(*name).small());
+                        ui.add_space(6.0);
+                    }
+                });
+                ui.separator();
+
+                // Memory over the last 10 minutes.
+                let now = Instant::now();
+                let to_mib = |b: u64| b as f32 / (1024.0 * 1024.0);
+                let series = |pick: fn(&perf::MemorySample) -> u64| -> Vec<(f32, f32)> {
+                    perf.memory.iter().map(|(at, m)| (now.duration_since(*at).as_secs_f32(), to_mib(pick(m)))).collect()
+                };
+                let private = series(|m| m.private);
+                let working = series(|m| m.working);
+                let (lo, hi) = private.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+                ui.horizontal(|ui| {
+                    ui.label(t("memory"));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if hi >= lo {
+                            ui.label(format!("±{:.0} MiB", (hi - lo) / 2.0));
+                        }
+                    });
+                });
+                graph(ui, &pal, &private, 600.0, None);
+                egui::Grid::new("memory-table").num_columns(4).spacing([18.0, 4.0]).show(ui, |ui| {
+                    ui.label("");
+                    for key in ["mem_now", "mem_change", "mem_trend"] {
+                        ui.label(RichText::new(t(key)).color(pal.dim).small());
+                    }
+                    ui.end_row();
+                    for (key, points) in [("mem_private", &private), ("mem_working", &working)] {
+                        ui.label(t(key));
+                        let (first, last) = (points.first().map(|p| p.1), points.last().map(|p| p.1));
+                        ui.label(last.map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into()));
+                        ui.label(first.zip(last).map(|(a, b)| format!("{:+.1}", b - a)).unwrap_or_else(|| "—".into()));
+                        // Points carry their age; the trend needs time running forward, in minutes.
+                        let forward: Vec<(f32, f32)> = points.iter().map(|(age, v)| (-age / 60.0, *v)).collect();
+                        // The first minute is mostly start-up loading, not a trend.
+                        let span = points.first().map_or(0.0, |p| p.0);
+                        let trend = perf::trend_per_minute(&forward).filter(|_| span >= 60.0);
+                        ui.label(trend.map(|v| format!("{v:+.2}")).unwrap_or_else(|| "—".into()));
+                        ui.end_row();
+                    }
+                });
+                ui.separator();
+
+                // Stage averages, by where they run.
+                ui.horizontal(|ui| {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.label(RichText::new(t("averages")).color(pal.dim).small());
+                    });
+                });
+                let value = |stage: Stage, over: Duration| {
+                    perf.average(stage, over).map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into())
+                };
+                egui::Grid::new("stage-groups").num_columns(2).spacing([28.0, 12.0]).show(ui, |ui| {
+                    for pair in Group::ALL.chunks(2) {
+                        for &group in pair {
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                    paint_segment(ui.painter(), rect, Segment::Work(group), &pal, None);
+                                    ui.label(RichText::new(t(group.text_key())).strong());
+                                });
+                                egui::Grid::new(("stages", group)).num_columns(3).spacing([14.0, 2.0]).show(ui, |ui| {
+                                    for stage in Stage::ALL.into_iter().filter(|st| st.group() == group) {
+                                        ui.label(t(stage.text_key()));
+                                        ui.label(value(stage, one));
+                                        ui.label(value(stage, twelve));
+                                        ui.end_row();
+                                    }
+                                });
+                            });
+                        }
+                        ui.end_row();
+                    }
+                });
             });
-        });
         s.debug = open;
     }
 
     fn sleeping(&self, s: &Settings) -> bool {
         s.idle_sleep && self.last_activity.elapsed() > Duration::from_secs(s.idle_minutes as u64 * 60)
+    }
+}
+
+/// Colour of a stage group in the debug view (fixed, so it reads the same in every scheme).
+fn group_color(group: Group) -> Color32 {
+    match group {
+        Group::Camera => Color32::from_rgb(200, 200, 200),
+        Group::Tracker => Color32::from_rgb(86, 156, 230),
+        Group::Core => Color32::from_rgb(240, 160, 64),
+        Group::Interface => Color32::from_rgb(168, 140, 255),
+    }
+}
+
+/// A latency segment: solid in its group colour, or hatched while waiting (labelled
+/// `queue` when there is room). Camera is drawn as an outline.
+fn paint_segment(painter: &egui::Painter, rect: Rect, segment: Segment, pal: &Palette, queue: Option<&str>) {
+    match segment {
+        Segment::Work(Group::Camera) => {
+            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.text), StrokeKind::Inside);
+        }
+        Segment::Work(group) => {
+            painter.rect_filled(rect, CornerRadius::ZERO, group_color(group));
+        }
+        Segment::Waiting => {
+            let hatch = painter.with_clip_rect(rect.intersect(painter.clip_rect()));
+            let mut x = rect.left() - rect.height();
+            while x < rect.right() {
+                hatch.line_segment(
+                    [Pos2::new(x, rect.bottom()), Pos2::new(x + rect.height(), rect.top())],
+                    Stroke::new(1.0, pal.dim),
+                );
+                x += 5.0;
+            }
+            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.dim), StrokeKind::Inside);
+            if let Some(queue) = queue
+                && rect.width() > 46.0
+            {
+                let label = Rect::from_center_size(rect.center(), Vec2::new(40.0, rect.height() - 2.0));
+                painter.rect_filled(label, CornerRadius::ZERO, pal.bg);
+                painter.text(rect.center(), Align2::CENTER_CENTER, queue, FontId::monospace(10.5), pal.text);
+            }
+        }
+    }
+}
+
+/// One line of `multi_graph`: (age seconds, ms) points, colour, dashed, name.
+type GraphLine<'a> = (Vec<(f32, f32)>, Color32, bool, &'a str);
+
+/// Several lines on one chart from 0 ms, newest on the right.
+fn multi_graph(ui: &mut egui::Ui, pal: &Palette, lines: &[GraphLine<'_>], span: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 64.0), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.line), StrokeKind::Inside);
+    let hi = lines.iter().flat_map(|l| l.0.iter().map(|p| p.1)).fold(1.0f32, f32::max);
+    for (points, color, dashed, _) in lines {
+        if points.len() < 2 {
+            continue;
+        }
+        let line: Vec<Pos2> = points
+            .iter()
+            .map(|(age, v)| {
+                Pos2::new(
+                    rect.right() - age / span * rect.width(),
+                    rect.bottom() - 4.0 - v / hi * (rect.height() - 8.0),
+                )
+            })
+            .collect();
+        let stroke = Stroke::new(1.2, *color);
+        if *dashed {
+            painter.extend(Shape::dashed_line(&line, stroke, 4.0, 3.0));
+        } else {
+            painter.add(Shape::line(line, stroke));
+        }
     }
 }
 
@@ -1909,8 +2120,13 @@ impl eframe::App for App {
         }
         self.shared.ui_awake.store(true, Ordering::Relaxed);
 
+        let copy_started = Instant::now();
         let snapshot = self.shared.snapshot.lock().clone();
-        self.update_texture(&ctx, &snapshot);
+        self.shared.perf.lock().record(Stage::Snapshot, ms_since(copy_started));
+        // A frame drawn for the first time adds to the Tables and Preview latencies.
+        let new_frame = (snapshot.frame_seq != self.seen_frame).then_some(snapshot.times).flatten();
+        self.seen_frame = snapshot.frame_seq;
+        let new_preview = self.update_texture(&ctx, &snapshot);
         self.hover = self.hover_now.take();
         self.prev_rows = std::mem::take(&mut self.rows);
 
@@ -1930,6 +2146,12 @@ impl eframe::App for App {
         let body = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 4));
         egui::CentralPanel::default().frame(body).show(ui, |ui| {
             self.preview(ui, &s, &snapshot);
+            if let Some(times) = new_frame
+                && new_preview
+            {
+                let breakdown = perf::interface_breakdown(&times, draw_started, Instant::now());
+                self.shared.perf.lock().record_path(Path::Preview, breakdown);
+            }
             ui.add_space(10.0);
             self.toolbar(ui, &mut s);
             ui.add_space(10.0);
@@ -1948,6 +2170,7 @@ impl eframe::App for App {
                     add(ui);
                 });
             };
+            let tables_started = Instant::now();
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
                 column(ui, Vec2::new(mp, height), &mut |ui| self.mediapipe_panel(ui, &mut s, &snapshot));
@@ -1966,6 +2189,11 @@ impl eframe::App for App {
                 }
             });
             self.draw_links(ui);
+            let mut perf = self.shared.perf.lock();
+            perf.record(Stage::Tables, ms_since(tables_started));
+            if let Some(times) = new_frame {
+                perf.record_path(Path::Tables, perf::interface_breakdown(&times, draw_started, Instant::now()));
+            }
         });
         if self.hover_now != self.hover {
             // Highlights follow the previous frame's hover; draw once more to catch up.
@@ -1985,7 +2213,7 @@ impl eframe::App for App {
             shared.last_avatar_id = last_avatar;
             self.shared.receive_port.store(s.receive_port, Ordering::Relaxed);
         }
-        self.shared.perf.lock().record(Stage::Interface, draw_started.elapsed().as_secs_f32() * 1000.0);
+        self.shared.perf.lock().record(Stage::Draw, ms_since(draw_started));
         self.persist();
     }
 

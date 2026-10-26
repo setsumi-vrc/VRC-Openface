@@ -30,9 +30,9 @@ pub fn gpu_adapters() -> Vec<GpuAdapter> {
     Vec::new()
 }
 
-/// Private bytes of this process.
+/// Private bytes and working set of this process.
 #[cfg(windows)]
-pub fn private_memory() -> Option<u64> {
+pub fn process_memory() -> Option<crate::perf::MemorySample> {
     use windows::Win32::System::ProcessStatus::{
         GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
     };
@@ -44,11 +44,11 @@ pub fn private_memory() -> Option<u64> {
         GetProcessMemoryInfo(GetCurrentProcess(), &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, size)
             .ok()?;
     }
-    Some(counters.PrivateUsage as u64)
+    Some(crate::perf::MemorySample { private: counters.PrivateUsage as u64, working: counters.WorkingSetSize as u64 })
 }
 
 #[cfg(not(windows))]
-pub fn private_memory() -> Option<u64> {
+pub fn process_memory() -> Option<crate::perf::MemorySample> {
     None
 }
 
