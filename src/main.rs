@@ -48,6 +48,9 @@ fn main() -> eframe::Result {
             .with_title("VRC Openface")
             .with_inner_size([1480.0, 940.0])
             .with_min_inner_size([960.0, 640.0]),
+        // Window state lives with the rest of the app data, so `VRC_OPENFACE_DATA` test
+        // runs keep their own and "Erase all app data" removes it too.
+        persistence_path: Some(vrc_openface::config::data_dir().join("window")),
         ..Default::default()
     };
     eframe::run_native(

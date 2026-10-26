@@ -63,3 +63,21 @@ pub fn high_resolution_timer() {
 
 #[cfg(not(windows))]
 pub fn high_resolution_timer() {}
+
+/// Opens a web page in the default browser. eframe is built without its `links`
+/// feature, so `Context::open_url` does nothing.
+pub fn open_url(url: &str) {
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        log::warn!("refusing to open {url}");
+        return;
+    }
+    #[cfg(windows)]
+    let result = std::process::Command::new("explorer").arg(url).spawn();
+    #[cfg(target_os = "macos")]
+    let result = std::process::Command::new("open").arg(url).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let result = std::process::Command::new("xdg-open").arg(url).spawn();
+    if let Err(e) = result {
+        log::warn!("opening {url}: {e}");
+    }
+}

@@ -14,13 +14,28 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ### Added
 - GitHub and X links next to the title.
+- Hover the blurred camera preview for a moment to see the camera unblurred; it blurs
+  again after 5 minutes.
+- Narrow layout: when the window (or the space beside the settings panel) is narrow,
+  Unified Expressions and Avatar share one column and MediaPipe shows one channel per line.
 
 ### Changed
+- The smoothing control is a slider box instead of an editable number.
+- Color scheme is a dropdown, and new installs start with the Custom scheme.
+- Bigger settings and color scheme buttons, with hover highlights.
+- Settings show each processing stage in a roomier box with its device and time; the
+  device of each stage is picked right in its box.
+- Expanded binary parameters list each bit as its own row with ON / OFF.
+- The toolbar wraps onto a second line instead of cutting buttons off, and the camera
+  preview takes less height in small windows.
 - New look for the parameter panels: dashed outlines, table rows with
   separators, and each MediaPipe group in its own box.
 - Hovering a MediaPipe channel no longer opens a floating box. Its Unified Expressions
   are linked where they are; when some are scrolled out of view, they move into one block
   in the list next to the channel, always fully visible.
+
+### Fixed
+- Links (GitHub, X, the Unified Expressions reference, Releases) did nothing when clicked.
 
 ## [0.3.0] - 2026-10-26
 

@@ -3,13 +3,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
-    #[default]
     Black,
     Light,
     Violet,
     Pink,
     Blue,
     Green,
+    /// The first-run default, starting from `CustomColors::default()`.
+    #[default]
     Custom,
 }
 

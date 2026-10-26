@@ -28,6 +28,10 @@ const SCALES: [f32; 6] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5];
 const MAPPING_DOCS: &str = "https://docs.vrcft.io/docs/tutorial-avatars/tutorial-avatars-extras/parameters";
 const ROW_HEIGHT: f32 = 30.0;
 const X_PROFILE: &str = "https://x.com/setsumi_vrc";
+/// How long the pointer rests on a blurred preview before it is shown unblurred, and
+/// for how long.
+const REVEAL_HOLD: Duration = Duration::from_millis(1500);
+const REVEAL_FOR: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Default)]
 enum UpdateState {
@@ -78,6 +82,11 @@ impl Rows {
     }
 }
 
+enum Icon<'a> {
+    Image(egui::TextureId),
+    Glyph(&'a str),
+}
+
 /// Rows connected to the hovered one, highlighted in every panel.
 struct Related {
     channels: [bool; COUNT],
@@ -117,6 +126,10 @@ pub struct App {
     /// While a channel stays hovered: where its expressions were moved to in the
     /// Unified Expressions list (`None` when they were all visible and stay in place).
     pulled: Option<(usize, Option<usize>)>,
+    /// When the pointer started resting on the blurred preview.
+    reveal_started: Option<Instant>,
+    /// Narrow layout: Unified Expressions above Avatar instead of side by side.
+    narrow: bool,
 }
 
 fn load_png(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<TextureHandle> {
@@ -283,6 +296,8 @@ impl App {
             hover_now: None,
             prev_rows: Rows::default(),
             pulled: None,
+            reveal_started: None,
+            narrow: false,
         }
     }
 
@@ -319,6 +334,71 @@ impl App {
         if response.clicked() {
             *on = !*on;
         }
+        response
+    }
+
+    /// Square button showing an image or a glyph: outlined on hover, filled when `on`.
+    fn icon_button(&self, ui: &mut egui::Ui, icon: Icon<'_>, on: bool) -> egui::Response {
+        let pal = self.pal;
+        let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let painter = ui.painter_at(rect.expand(1.0));
+        let fg = if on {
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.accent);
+            pal.on_accent
+        } else if response.hovered() {
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.5));
+            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.dim), StrokeKind::Inside);
+            pal.text
+        } else {
+            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.line), StrokeKind::Inside);
+            pal.text.gamma_multiply(0.85)
+        };
+        match icon {
+            Icon::Image(texture) => {
+                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+                painter.image(texture, Rect::from_center_size(rect.center(), Vec2::splat(18.0)), uv, fg);
+            }
+            Icon::Glyph(glyph) => {
+                painter.text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(18.0), fg);
+            }
+        }
+        response
+    }
+
+    /// A labelled box that works as a slider: click or drag across it to set `value`
+    /// (0..1). The filled part shows the value; 0 reads as `zero_text`.
+    fn slider_box(
+        &self,
+        ui: &mut egui::Ui,
+        value: &mut f32,
+        label: &str,
+        zero_text: &str,
+        width: f32,
+    ) -> egui::Response {
+        let pal = self.pal;
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(width, 24.0), Sense::click_and_drag());
+        response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if (response.dragged() || response.clicked())
+            && let Some(pointer) = response.interact_pointer_pos()
+        {
+            // Snap the first few percent to zero so "off" is easy to hit.
+            let v = ((pointer.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+            let v = if v < 0.03 { 0.0 } else { (v * 100.0).round() / 100.0 };
+            if v != *value {
+                *value = v;
+                response.mark_changed();
+            }
+        }
+        let painter = ui.painter_at(rect);
+        let fill = Rect::from_min_size(rect.min, Vec2::new(rect.width() * *value, rect.height()));
+        painter.rect_filled(fill, CornerRadius::ZERO, pal.accent.gamma_multiply(0.35));
+        let border = if response.hovered() || response.dragged() { pal.dim } else { pal.line };
+        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, border), StrokeKind::Inside);
+        let font = FontId::monospace(12.0);
+        painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), pal.text);
+        let shown = if *value > 0.0 { percent(*value) } else { zero_text.to_string() };
+        painter.text(rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, shown, font, pal.text);
         response
     }
 
@@ -397,13 +477,9 @@ impl App {
             ui.label(RichText::new("VRC OPENFACE").heading().strong());
             ui.add_space(10.0);
             for (texture, url) in &self.links {
-                let image =
-                    egui::Image::new((texture.id(), Vec2::splat(18.0))).tint(self.pal.text).sense(Sense::click());
-                let link = ui.add(image).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(*url);
-                if link.clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(*url));
+                if self.icon_button(ui, Icon::Image(texture.id()), false).on_hover_text(*url).clicked() {
+                    crate::system::open_url(url);
                 }
-                ui.add_space(4.0);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 for language in Language::ALL.iter().rev() {
@@ -413,23 +489,31 @@ impl App {
                     }
                 }
                 ui.add_space(8.0);
-                let mut theme = self.theme_open;
-                if self.toggle(ui, &mut theme, "🎨").on_hover_text(self.t(s, "color_scheme")).clicked() {
-                    self.theme_open = theme;
+                if self
+                    .icon_button(ui, Icon::Glyph("🎨"), self.theme_open)
+                    .on_hover_text(self.t(s, "color_scheme"))
+                    .clicked()
+                {
+                    self.theme_open = !self.theme_open;
                 }
-                let mut open = self.settings_open;
-                if self.toggle(ui, &mut open, "⚙").on_hover_text(self.t(s, "settings")).clicked() {
-                    self.settings_open = open;
+                if self
+                    .icon_button(ui, Icon::Glyph("⚙"), self.settings_open)
+                    .on_hover_text(self.t(s, "settings"))
+                    .clicked()
+                {
+                    self.settings_open = !self.settings_open;
                 }
                 ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).color(self.pal.dim));
             });
         });
     }
 
-    fn preview(&self, ui: &mut egui::Ui, s: &Settings, snapshot: &Snapshot) {
+    fn preview(&mut self, ui: &mut egui::Ui, s: &Settings, snapshot: &Snapshot) {
         let pal = self.pal;
-        let height = (ui.available_height() * 0.42).clamp(160.0, 430.0);
-        let (outer, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
+        // Short or narrow areas give more of their height to the parameter lists.
+        let share = if ui.available_height() < 700.0 || ui.available_width() < 900.0 { 0.30 } else { 0.42 };
+        let height = (ui.available_height() * share).clamp(120.0, 430.0);
+        let (outer, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
         let painter = ui.painter_at(outer);
         painter.rect_filled(outer, CornerRadius::ZERO, pal.bg);
 
@@ -472,6 +556,7 @@ impl App {
             self.draw_ears(&painter, snapshot, &to_screen);
         }
         painter.rect_stroke(outer, CornerRadius::ZERO, Stroke::new(1.0, pal.line), StrokeKind::Inside);
+        self.reveal_on_hover(ui, &painter, &response, s, image);
 
         let status = match &snapshot.status {
             Status::Running => None,
@@ -522,6 +607,44 @@ impl App {
         );
     }
 
+    /// Holding the pointer over a blurred preview for `REVEAL_HOLD` shows the camera
+    /// unblurred for `REVEAL_FOR`; a ring around the pointer fills while it waits.
+    fn reveal_on_hover(
+        &mut self,
+        ui: &egui::Ui,
+        painter: &egui::Painter,
+        response: &egui::Response,
+        s: &Settings,
+        image: Rect,
+    ) {
+        let revealed = self.shared.unblurred_until.lock().is_some_and(|until| Instant::now() < until);
+        let pointer = response.hover_pos().filter(|p| image.contains(*p));
+        let (Some(pointer), true, true, false) = (pointer, s.show_camera, s.camera_blur, revealed) else {
+            self.reveal_started = None;
+            return;
+        };
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        let started = *self.reveal_started.get_or_insert_with(Instant::now);
+        let progress = (started.elapsed().as_secs_f32() / REVEAL_HOLD.as_secs_f32()).min(1.0);
+        if progress >= 1.0 {
+            *self.shared.unblurred_until.lock() = Some(Instant::now() + REVEAL_FOR);
+            self.reveal_started = None;
+            return;
+        }
+        let center = pointer + Vec2::new(0.0, -26.0);
+        let radius = 18.0;
+        painter.circle_stroke(center, radius, Stroke::new(3.0, Color32::from_white_alpha(40)));
+        let steps = 48;
+        let arc: Vec<Pos2> = (0..=(steps as f32 * progress) as usize)
+            .map(|i| {
+                let angle = -std::f32::consts::FRAC_PI_2 + i as f32 / steps as f32 * std::f32::consts::TAU;
+                center + Vec2::angled(angle) * radius
+            })
+            .collect();
+        painter.add(Shape::line(arc, Stroke::new(3.0, Color32::WHITE)));
+        ui.ctx().request_repaint();
+    }
+
     /// Two triangles above the forehead whose tilt follows the ear outputs.
     fn draw_ears(&self, painter: &egui::Painter, snapshot: &Snapshot, to_screen: &dyn Fn(&[f32; 3]) -> Pos2) {
         let lm = &snapshot.landmarks;
@@ -551,7 +674,8 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
-        ui.horizontal(|ui| {
+        // Wraps onto a second line in narrow windows instead of cutting buttons off.
+        ui.horizontal_wrapped(|ui| {
             let selected = self
                 .cameras
                 .iter()
@@ -604,9 +728,12 @@ impl App {
                 let _ = self.commands.send(Command::ResetGaze);
             }
             let hint = self.t(s, "search");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text(hint).desired_width(200.0));
-            });
+            let search = egui::TextEdit::singleline(&mut self.search).hint_text(hint).desired_width(200.0);
+            if ui.available_width() >= 210.0 {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.add(search));
+            } else {
+                ui.add(search);
+            }
         });
     }
 
@@ -874,20 +1001,7 @@ impl App {
                 self.toggle(ui, &mut s.processing.symmetric_face, label).on_hover_text(hint);
                 let (name, off) = (self.t(s, "smoothing"), self.t(s, "smoothing_off"));
                 let hint = self.t(s, "smoothing_hint");
-                // Drag sideways to change, or double-click to type a percentage.
-                ui.add(
-                    egui::DragValue::new(&mut s.processing.smoothing)
-                        .range(0.0..=1.0)
-                        .speed(0.005)
-                        .custom_formatter(move |v, _| {
-                            if v > 0.0 { format!("{name} {:.0}%", v * 100.0) } else { format!("{name} {off}") }
-                        })
-                        .custom_parser(|text| {
-                            let number = text.split_whitespace().last()?.trim_end_matches('%');
-                            number.parse::<f64>().ok().map(|v| (v / 100.0).clamp(0.0, 1.0))
-                        }),
-                )
-                .on_hover_text(hint);
+                self.slider_box(ui, &mut s.processing.smoothing, name, off, 150.0).on_hover_text(hint);
             };
             header(ui, "mediapipe", title, controls);
             if s.tongue {
@@ -914,6 +1028,8 @@ impl App {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 let full = ui.available_width();
                 let half = (full / 2.0).floor();
+                // Too narrow for left and right side by side: one channel per line.
+                let single = half < 160.0;
                 for group in channels::display_rows() {
                     let rows: Vec<_> = group
                         .into_iter()
@@ -931,30 +1047,34 @@ impl App {
                     }
                     let group_top = ui.cursor().top();
                     for (l, r) in rows {
-                        let clicked = ui
-                            .horizontal(|ui| {
-                                let cells: Vec<(usize, f32)> = match r {
-                                    Some(r) => vec![(l, half), (r, full - half)],
-                                    None => vec![(l, full)],
-                                };
-                                let mut clicked = false;
-                                for (i, width) in cells {
-                                    let highlight = related.channels[i];
-                                    let cell =
-                                        self.channel_cell(ui, s, snapshot, i, used[i], width, &avatar, highlight);
-                                    self.rows.channels.push((i, cell.rect));
-                                    if cell.hovered() {
-                                        self.hover_now = Some(Hover::Channel(i));
+                        let lines: Vec<Vec<(usize, f32)>> = match r {
+                            Some(r) if single => vec![vec![(l, full)], vec![(r, full)]],
+                            Some(r) => vec![vec![(l, half), (r, full - half)]],
+                            None => vec![vec![(l, full)]],
+                        };
+                        let mut clicked = false;
+                        for cells in lines {
+                            clicked |= ui
+                                .horizontal(|ui| {
+                                    let mut clicked = false;
+                                    for (i, width) in cells {
+                                        let highlight = related.channels[i];
+                                        let cell =
+                                            self.channel_cell(ui, s, snapshot, i, used[i], width, &avatar, highlight);
+                                        self.rows.channels.push((i, cell.rect));
+                                        if cell.hovered() {
+                                            self.hover_now = Some(Hover::Channel(i));
+                                        }
+                                        clicked |= cell.clicked();
+                                        if width == half {
+                                            let divider = Stroke::new(1.0, self.pal.line.gamma_multiply(0.6));
+                                            ui.painter().vline(cell.rect.right(), cell.rect.y_range(), divider);
+                                        }
                                     }
-                                    clicked |= cell.clicked();
-                                    if width == half {
-                                        let divider = Stroke::new(1.0, self.pal.line.gamma_multiply(0.6));
-                                        ui.painter().vline(cell.rect.right(), cell.rect.y_range(), divider);
-                                    }
-                                }
-                                clicked
-                            })
-                            .inner;
+                                    clicked
+                                })
+                                .inner;
+                        }
                         if clicked {
                             self.expanded = if self.expanded == Some(l) { None } else { Some(l) };
                         }
@@ -992,7 +1112,7 @@ impl App {
                     egui::Label::new(RichText::new(title).strong().color(pal.text)).truncate().sense(Sense::click());
                 let link = ui.add(link).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hint);
                 if link.clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(MAPPING_DOCS));
+                    crate::system::open_url(MAPPING_DOCS);
                 }
             };
             let controls = |ui: &mut egui::Ui| {
@@ -1122,12 +1242,9 @@ impl App {
                     }
                     if expanded {
                         let (set, sign) = binding.encode(value);
-                        let short = |a: &str| a.trim_start_matches("/avatar/parameters/").to_string();
-                        for (address, on) in binding.bits.iter().zip(set) {
-                            ui.label(RichText::new(format!("   {} = {on}", short(address))).small().color(pal.dim));
-                        }
-                        if let Some(address) = &binding.negative {
-                            ui.label(RichText::new(format!("   {} = {sign}", short(address))).small().color(pal.dim));
+                        let bits = binding.bits.iter().zip(set).chain(binding.negative.iter().map(|a| (a, sign)));
+                        for (address, on) in bits {
+                            bit_row(ui, &pal, address, on);
                         }
                     }
                 }
@@ -1154,6 +1271,11 @@ impl App {
         let stroke = Stroke::new(1.0, pal.text.gamma_multiply(0.85));
         let link = |a: Pos2, b: Pos2| painter.line_segment([a, b], stroke);
         let to_avatar = |output: usize, y: f32| {
+            // In the narrow layout the avatar panel sits under the expressions; a line
+            // would cut across them.
+            if self.narrow {
+                return;
+            }
             if let Some(ay) = Rows::y(&rows.avatar, output, rows.view[2]) {
                 link(Pos2::new(ue.right(), y), Pos2::new(avatar.left(), ay));
             }
@@ -1191,8 +1313,8 @@ impl App {
         }
     }
 
-    fn device_picker(&self, ui: &mut egui::Ui, s: &Settings, id: &str, device: &mut Device) {
-        let label = |d: Device| match d {
+    fn device_name(&self, s: &Settings, device: Device) -> String {
+        match device {
             Device::Auto => self.t(s, "auto").to_string(),
             Device::Cpu => self.t(s, "cpu").to_string(),
             Device::Gpu(i) => self
@@ -1202,34 +1324,65 @@ impl App {
                 .find(|g| g.index == i)
                 .map(|g| format!("GPU {i}: {}", g.name))
                 .unwrap_or_else(|| format!("GPU {i}")),
-        };
-        egui::ComboBox::from_id_salt(id)
-            .width((ui.available_width() - 8.0).clamp(80.0, 220.0))
-            .selected_text(label(*device))
-            .truncate()
-            .show_ui(ui, |ui| {
-                let mut options = vec![Device::Auto, Device::Cpu];
-                options.extend(self.shared.gpus.iter().map(|g| Device::Gpu(g.index)));
-                for option in options {
-                    ui.selectable_value(device, option, label(option));
-                }
-            });
+        }
     }
 
-    fn stage_box(&self, ui: &mut egui::Ui, title: &str, ms: Option<f32>, device: &str, hint: Option<&str>) {
-        Frame::new().stroke(Stroke::new(1.0, self.pal.line)).inner_margin(Margin::same(8)).show(ui, |ui| {
+    /// Device choice. `plain` draws it as text with a ▾, for use inside a stage box.
+    fn device_picker(&self, ui: &mut egui::Ui, s: &Settings, id: &str, device: &mut Device, prefix: &str, plain: bool) {
+        let width = ui.available_width() - 4.0;
+        ui.scope(|ui| {
+            if plain {
+                let w = &mut ui.visuals_mut().widgets;
+                for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                    state.bg_stroke = Stroke::NONE;
+                    state.weak_bg_fill = Color32::TRANSPARENT;
+                }
+                w.inactive.fg_stroke.color = self.pal.dim;
+            }
+            egui::ComboBox::from_id_salt(id)
+                .width(width.max(80.0))
+                .selected_text(format!("{prefix} {}", self.device_name(s, *device)).trim_start().to_string())
+                .truncate()
+                .show_ui(ui, |ui| {
+                    let mut options = vec![Device::Auto, Device::Cpu];
+                    options.extend(self.shared.gpus.iter().map(|g| Device::Gpu(g.index)));
+                    for option in options {
+                        ui.selectable_value(device, option, self.device_name(s, option));
+                    }
+                });
+        });
+    }
+
+    /// One processing stage: title (with an optional help mark) and time on the first
+    /// line, then `body` (the device) below, in a roomy outlined box.
+    fn stage_box(
+        &self,
+        ui: &mut egui::Ui,
+        title: &str,
+        ms: Option<f32>,
+        hint: Option<&str>,
+        body: impl FnOnce(&mut egui::Ui),
+    ) {
+        let pal = self.pal;
+        Frame::new().stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
-                let r = ui.label(RichText::new(title).strong());
+                ui.label(RichText::new(title).strong());
                 if let Some(hint) = hint {
-                    r.on_hover_text(hint);
+                    let (rect, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                    let color = if response.hovered() { pal.text } else { pal.dim };
+                    ui.painter().circle_stroke(rect.center(), 7.0, Stroke::new(1.0, color));
+                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "?", FontId::monospace(10.0), color);
+                    response.on_hover_text(hint);
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     ui.label(ms.map(|m| format!("{m:.2} ms")).unwrap_or_else(|| "—".into()));
                 });
             });
-            ui.label(RichText::new(device).color(self.pal.dim));
+            ui.add_space(4.0);
+            body(ui);
         });
+        ui.add_space(10.0);
     }
 
     fn settings_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
@@ -1309,12 +1462,13 @@ impl App {
                 ui.label(self.t(s, "processing_devices"));
                 let mut all = if s.face_device == s.tongue_device { s.face_device } else { Device::Auto };
                 let before = all;
-                self.device_picker(ui, s, "all-devices", &mut all);
+                self.device_picker(ui, s, "all-devices", &mut all, self.t(s, "all"), false);
                 if all != before {
                     s.face_device = all;
                     s.tongue_device = all;
                 }
             });
+            ui.add_space(8.0);
             if cfg!(not(feature = "directml")) {
                 ui.label(
                     RichText::new("GPU inference needs a build with the `directml` feature.").color(pal.dim).small(),
@@ -1322,36 +1476,46 @@ impl App {
             }
             let perf = self.shared.perf.lock().clone();
             let avg = |stage: Stage| perf.stages.get(&stage).and_then(|st| st.average(Duration::from_secs(1)));
-            let capture = self.t(s, "camera_capture");
-            self.stage_box(ui, capture, avg(Stage::Camera), "Media Foundation", Some(self.t(s, "capture_hint")));
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("MediaPipe").color(pal.dim));
+            let (capture, capture_hint) = (self.t(s, "camera_capture"), self.t(s, "capture_hint"));
+            self.stage_box(ui, capture, avg(Stage::Camera), Some(capture_hint), |ui| {
+                ui.label(RichText::new("Media Foundation").color(pal.dim));
+            });
+            self.stage_box(ui, "MediaPipe", avg(Stage::MediaPipe), None, |ui| {
                 let mut d = s.face_device;
-                self.device_picker(ui, s, "face-device", &mut d);
+                self.device_picker(ui, s, "face-device", &mut d, "", true);
                 s.face_device = d;
+                if !snapshot.face_device.is_empty() && snapshot.face_device != self.device_name(s, d) {
+                    ui.label(RichText::new(&snapshot.face_device).color(pal.dim).small());
+                }
             });
-            self.stage_box(ui, "MediaPipe", avg(Stage::MediaPipe), &snapshot.face_device, None);
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(self.t(s, "tongue")).color(pal.dim));
-                let mut d = s.tongue_device;
-                self.device_picker(ui, s, "tongue-device", &mut d);
-                s.tongue_device = d;
-            });
-            let tongue_device = match &snapshot.tongue {
-                TongueStatus::Ready => snapshot.tongue_device.clone(),
-                TongueStatus::Off => self.t(s, "enable_tongue").to_string(),
-                TongueStatus::Missing => self.t(s, "tongue_missing").to_string(),
-                TongueStatus::Error(e) => e.clone(),
-            };
             let tongue_ms = avg(Stage::Tongue).filter(|_| snapshot.tongue == TongueStatus::Ready);
-            self.stage_box(ui, self.t(s, "tongue"), tongue_ms, &tongue_device, None);
-            ui.horizontal_wrapped(|ui| {
-                if ui.button(self.t(s, "import_tongue")).clicked() {
-                    self.import_tongue();
+            let tongue = self.t(s, "tongue");
+            self.stage_box(ui, tongue, tongue_ms, None, |ui| {
+                match &snapshot.tongue {
+                    TongueStatus::Ready => {
+                        let mut d = s.tongue_device;
+                        self.device_picker(ui, s, "tongue-device", &mut d, "", true);
+                        s.tongue_device = d;
+                    }
+                    TongueStatus::Off => {
+                        ui.label(RichText::new(self.t(s, "enable_tongue")).color(pal.dim));
+                    }
+                    TongueStatus::Missing => {
+                        ui.label(RichText::new(self.t(s, "tongue_missing")).color(pal.dim));
+                    }
+                    TongueStatus::Error(e) => {
+                        ui.label(RichText::new(e).color(pal.dim));
+                    }
                 }
-                if tracker::tongue_path(&self.model_dir).is_some() {
-                    ui.label(RichText::new(format!("✔ {}", self.t(s, "tongue_ready"))).color(pal.dim));
-                }
+                ui.add_space(6.0);
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button(self.t(s, "import_tongue")).clicked() {
+                        self.import_tongue();
+                    }
+                    if tracker::tongue_path(&self.model_dir).is_some() {
+                        ui.label(RichText::new(format!("✔ {}", self.t(s, "tongue_ready"))).color(pal.dim));
+                    }
+                });
             });
             ui.separator();
 
@@ -1476,7 +1640,7 @@ impl App {
                 }
             }
             if ui.link(self.t(s, "releases")).clicked() {
-                ui.ctx().open_url(egui::OpenUrl::new_tab(&release.page));
+                crate::system::open_url(&release.page);
             }
         });
         install
@@ -1510,18 +1674,19 @@ impl App {
         let mut open = self.theme_open;
         let title = self.t(s, "color_scheme");
         egui::Window::new(title).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for scheme in Scheme::ALL {
-                    let mut on = s.scheme == scheme;
-                    if self.toggle(ui, &mut on, self.t(s, scheme.text_key())).clicked() {
-                        s.scheme = scheme;
+            let language = s.language;
+            egui::ComboBox::from_id_salt("scheme")
+                .width(200.0)
+                .selected_text(tr(language, s.scheme.text_key()))
+                .show_ui(ui, |ui| {
+                    for scheme in Scheme::ALL {
+                        ui.selectable_value(&mut s.scheme, scheme, tr(language, scheme.text_key()));
                     }
-                }
-            });
+                });
             if s.scheme == Scheme::Custom {
                 ui.add_space(6.0);
-                let language = s.language;
-                egui::Grid::new("custom-colors").num_columns(2).show(ui, |ui| {
+                let outline = Stroke::new(1.0, self.pal.dim);
+                egui::Grid::new("custom-colors").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
                     let c = &mut s.custom_colors;
                     for (key, color) in [
                         ("theme_background", &mut c.background),
@@ -1530,7 +1695,9 @@ impl App {
                         ("theme_accent", &mut c.accent),
                     ] {
                         ui.label(tr(language, key));
-                        ui.color_edit_button_srgb(color);
+                        let swatch = ui.color_edit_button_srgb(color);
+                        // Dark colours vanish against the window without an outline.
+                        ui.painter().rect_stroke(swatch.rect, CornerRadius::ZERO, outline, StrokeKind::Outside);
                         ui.end_row();
                     }
                 });
@@ -1684,6 +1851,25 @@ fn paint_value_row(
     row_separator(painter, rect, pal);
 }
 
+/// One synced bool of a binary parameter, shown under its parameter: the parameter
+/// name without its path, and ON / OFF.
+fn bit_row(ui: &mut egui::Ui, pal: &Palette, address: &str, on: bool) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
+    let painter = ui.painter_at(rect);
+    let name = address.rsplit('/').next().unwrap_or(address).to_string();
+    let galley = truncated(&painter, name, FontId::monospace(12.0), pal.dim, rect.width() - 80.0);
+    painter.galley(rect.left_center() + Vec2::new(26.0, -galley.size().y / 2.0), galley, pal.dim);
+    let (text, color) = if on { ("ON", pal.text) } else { ("OFF", pal.dim) };
+    painter.text(
+        rect.right_center() - Vec2::new(10.0, 0.0),
+        Align2::RIGHT_CENTER,
+        text,
+        FontId::monospace(11.5),
+        color,
+    );
+    row_separator(&painter, rect, pal);
+}
+
 /// Thin line under a table row.
 fn row_separator(painter: &egui::Painter, rect: Rect, pal: &Palette) {
     let y = rect.bottom() - 0.5;
@@ -1748,26 +1934,36 @@ impl eframe::App for App {
             self.toolbar(ui, &mut s);
             ui.add_space(10.0);
 
-            let height = ui.available_height() - 4.0;
+            let height = (ui.available_height() - 4.0).max(120.0);
             let width = ui.available_width();
             // Wide enough for the links between the panels to be readable.
             let gap = 26.0;
-            let mp = (width - gap * 2.0) * 0.48;
-            let side = (width - gap * 2.0 - mp) / 2.0;
+            // Below this width three columns get too narrow to read; the Unified Expressions
+            // and Avatar panels then share the right column, one above the other.
+            self.narrow = width < 900.0;
+            let mp = if self.narrow { (width - gap) * 0.5 } else { (width - gap * 2.0) * 0.48 };
+            let column = |ui: &mut egui::Ui, size: Vec2, add: &mut dyn FnMut(&mut egui::Ui)| {
+                ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                    ui.set_min_size(size);
+                    add(ui);
+                });
+            };
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                ui.allocate_ui_with_layout(Vec2::new(mp, height), Layout::top_down(Align::Min), |ui| {
-                    ui.set_min_size(Vec2::new(mp, height));
-                    self.mediapipe_panel(ui, &mut s, &snapshot);
-                });
-                ui.allocate_ui_with_layout(Vec2::new(side, height), Layout::top_down(Align::Min), |ui| {
-                    ui.set_min_size(Vec2::new(side, height));
-                    self.unified_panel(ui, &mut s, &snapshot);
-                });
-                ui.allocate_ui_with_layout(Vec2::new(side, height), Layout::top_down(Align::Min), |ui| {
-                    ui.set_min_size(Vec2::new(side, height));
-                    self.avatar_panel(ui, &mut s, &snapshot);
-                });
+                column(ui, Vec2::new(mp, height), &mut |ui| self.mediapipe_panel(ui, &mut s, &snapshot));
+                if self.narrow {
+                    let side = width - gap - mp;
+                    let half = ((height - 10.0) / 2.0).floor();
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 10.0;
+                        column(ui, Vec2::new(side, half), &mut |ui| self.unified_panel(ui, &mut s, &snapshot));
+                        column(ui, Vec2::new(side, half), &mut |ui| self.avatar_panel(ui, &mut s, &snapshot));
+                    });
+                } else {
+                    let side = (width - gap * 2.0 - mp) / 2.0;
+                    column(ui, Vec2::new(side, height), &mut |ui| self.unified_panel(ui, &mut s, &snapshot));
+                    column(ui, Vec2::new(side, height), &mut |ui| self.avatar_panel(ui, &mut s, &snapshot));
+                }
             });
             self.draw_links(ui);
         });

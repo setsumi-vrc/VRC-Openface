@@ -119,6 +119,8 @@ pub struct Shared {
     pub ui_awake: AtomicBool,
     pub receive_port: Arc<AtomicU16>,
     pub gpus: Vec<GpuAdapter>,
+    /// The preview is shown unblurred until this time (set by hovering the preview).
+    pub unblurred_until: Mutex<Option<Instant>>,
 }
 
 impl Shared {
@@ -133,6 +135,7 @@ impl Shared {
             ui_awake: AtomicBool::new(true),
             receive_port: Arc::new(AtomicU16::new(port)),
             gpus: system::gpu_adapters(),
+            unblurred_until: Mutex::new(None),
         }
     }
 }
@@ -517,7 +520,8 @@ impl Tracker {
         let preview = settings.show_camera.then(|| {
             self.preview_seq += 1;
             let mut small = frame.downscale_to_width(PREVIEW_MAX_WIDTH);
-            if settings.camera_blur {
+            let revealed = self.shared.unblurred_until.lock().is_some_and(|until| Instant::now() < until);
+            if settings.camera_blur && !revealed {
                 small.blur(small.width / 60 + 2);
             }
             Arc::new(small)
