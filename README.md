@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon.png" width="128" alt="VRC Openface icon"></p>
+
 # VRC Openface
 
 Webcam face tracking for VRChat, written in Rust. VRC Openface runs Google's MediaPipe
@@ -30,6 +32,9 @@ OpenCV.
 - **Cat ears**: drives `EarLeft` / `EarRight` (v2, -1…1) from your brows. Raised brows
   perk the ears up and lowered brows fold them back. Add those float parameters to
   your avatar to use it.
+- **See what drives what**: hover a MediaPipe channel to see the Unified Expressions it
+  feeds and the avatar parameters they reach, linked with lines across the three panels
+  (and the other way round from an expression or avatar parameter).
 - Settings panel: VRChat and receive ports, interface scale, sleep when idle, friendly
   names, updates from GitHub releases, debug performance (latency, memory, timing per
   stage), camera preview blur, processing devices, and erase all app data.
@@ -81,9 +86,14 @@ cargo clippy --all-targets
 cargo run --release --example still_image -- path/to/face.jpg   # blendshapes as JSON
 cargo run --release --example camera_check -- 0 640 480 30       # camera mode and real FPS
 uv run tools/convert_models.py                                   # rebuild models/*.onnx
+uv run tools/make_icons.py                                       # rebuild assets/ (icon, avatar, social preview)
 ```
 
 `VRC_OPENFACE_DATA=<folder>` runs the app with a separate data folder.
+
+## Changes
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each version.
 
 ## License
 

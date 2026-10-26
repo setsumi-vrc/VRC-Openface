@@ -1,6 +1,6 @@
 [package]
 name = "vrc-openface"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Webcam face tracking for VRChat: MediaPipe blendshapes to Unified Expressions over OSC"
@@ -47,6 +47,9 @@ windows = { version = "0.62", features = [
 
 [target.'cfg(not(windows))'.dependencies]
 nokhwa = { version = "0.10", features = ["input-native"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }

@@ -38,8 +38,13 @@ fn main() -> eframe::Result {
         feed: output::spawn(shared.perf.clone()),
     };
 
+    let mut viewport = eframe::egui::ViewportBuilder::default();
+    match eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => log::warn!("window icon: {e}"),
+    }
     let options = eframe::NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
+        viewport: viewport
             .with_title("VRC Openface")
             .with_inner_size([1480.0, 940.0])
             .with_min_inner_size([960.0, 640.0]),

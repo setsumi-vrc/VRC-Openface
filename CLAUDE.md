@@ -13,6 +13,7 @@ cargo fmt                                     # rustfmt.toml: max_width 120
 cargo run --release --example still_image -- face.jpg       # pipeline on a still image, JSON out
 cargo run --release --example camera_check -- 0 640 480 30  # camera mode + measured FPS
 uv run tools/convert_models.py                # regenerate models/*.onnx from Google's .task
+uv run tools/make_icons.py                    # regenerate assets/ (icon.png/.ico, avatar, social preview)
 ```
 
 `VRC_OPENFACE_DATA=<folder>` runs the app with its own data folder (settings,
@@ -82,6 +83,19 @@ closest area, then MJPG > NV12 > YUY2) and asks the source reader for RGB32, sca
 the requested width when the camera only offers large modes. nokhwa is used only on
 other platforms; its MSMF backend misreported modes and delivered about 12 FPS on a Brio 500.
 
+### Interface details (`app.rs`)
+
+- Panel headers go through `header()`: title on the left (truncated), controls on the
+  right, added right-to-left. Never let a right-to-left row overflow: it pushes the whole
+  panel off the left edge. `header()` wraps the controls instead.
+- Panel links: each frame records row rects in `Rows` and the hovered row in
+  `hover_now`; highlights use the previous frame's `hover`, and `draw_links` paints the
+  lines (and the expression overlay for a hovered channel) after the three panels.
+- Use `min().max()` rather than `f32::clamp` with bounds taken from layout rects; empty
+  rects (min > max) make `clamp` panic.
+- The window icon is `assets/icon.png`; `build.rs` embeds `assets/icon.ico` in the exe
+  with `winresource`.
+
 ### Other modules
 
 `config.rs` (Settings, data dir, JSON persistence via write-then-rename), `i18n.rs`
@@ -99,5 +113,10 @@ DirectML device ids, private memory, timer resolution).
 - Never commit `tongue_model.onnx` (git-ignored) or other third-party weights.
   `models/*.onnx` must stay reproducible with `tools/convert_models.py`.
 - Commits use the generic identity in this repo's local git config.
+- Versions: patch (0.3.0 → 0.3.1) for fixes, minor (→ 0.4.0) for features or
+  behaviour changes, major (1.0.0) only for a big milestone or a breaking change to
+  settings, calibrations or avatar setups. Record every change under `[Unreleased]` in
+  `CHANGELOG.md`; on release, rename that section to the version and date, bump
+  `Cargo.toml`, tag `vX.Y.Z` and use the section as the release notes.
 - Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/` (without any
   tongue model), `README.md` and `LICENSE`; the updater requires the exe in the zip.

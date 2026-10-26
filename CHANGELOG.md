@@ -1,0 +1,63 @@
+# Changelog
+
+All notable changes to VRC Openface are listed here, newest first.
+
+Versions follow `MAJOR.MINOR.PATCH`:
+
+- **Patch** (0.3.0 → 0.3.1): bug fixes and small polish. Nothing new to learn.
+- **Minor** (0.3.x → 0.4.0): new features or noticeable behaviour changes.
+- **Major** (0.x → 1.0.0): reserved for big milestones, such as the first version
+  considered complete and stable, or a change that breaks existing settings,
+  calibrations or avatar setups.
+
+## [Unreleased]
+
+## [0.3.0] - 2026-10-26
+
+### Added
+- Links between the parameter panels. Hovering a MediaPipe channel shows the Unified
+  Expressions it feeds, laid over that panel next to the channel, with lines to them and
+  on to the avatar parameters they drive. Hovering a Unified Expression or an avatar
+  parameter draws lines back to its sources. Related rows are highlighted in every panel.
+- App icon for the window, the taskbar and `vrc-openface.exe`.
+- This changelog.
+
+### Changed
+- The smoothing control in the MediaPipe panel is a compact box: drag sideways to
+  change it, or double-click to type a percentage.
+- Wider gaps between the panels to make room for the links.
+
+### Fixed
+- Panel headers overlapped when the window was narrow or the settings panel was open.
+  Titles are now shortened with "…", and the controls move to a second line when needed.
+- The MediaPipe panel slid off the left edge of the window when its header did not fit.
+- Settings labels were cut off on the left because some rows (processing devices,
+  tongue model) were wider than the settings panel.
+- Long parameter names ran into their values; they are now shortened to fit.
+
+## [0.2.0] - 2026-10-26
+
+### Added
+- Interpolated 100 Hz OSC output, sent as bundles so binary parameters update together.
+  Float and binary versions of a parameter are both sent.
+- Full 116-parameter Unified Expressions mapping with friendly names, and a geometric
+  (mesh) frown estimate.
+- Per-avatar calibration: neutral capture with undo, gaze centre, range, override,
+  linked left/right, per-group symmetry and per-channel smoothing.
+- Avatar name and parameters from VRChat's avatar config files and the receive port,
+  in addition to OSCQuery.
+- Settings panel: ports, interface scale, sleep when idle, updates from GitHub
+  releases, debug performance, preview blur, processing devices and erase app data.
+- DirectML GPU inference by default, with CPU fallback.
+- Tongue model importer, cat ears, colour schemes, and English / 日本語 / 한국어.
+
+## [0.1.0] - 2026-10-25
+
+### Added
+- First release: webcam capture, MediaPipe face landmarks and blendshapes on ONNX
+  Runtime, Unified Expressions mapping and OSC output to VRChat.
+
+[Unreleased]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/setsumi-vrc/VRC-Openface/releases/tag/v0.1.0
