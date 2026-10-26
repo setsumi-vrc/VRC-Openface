@@ -76,30 +76,50 @@ pub fn is_eye_look(index: usize) -> bool {
     name(index).starts_with("eyeLook")
 }
 
-/// Left/right pairs averaged by "Symmetric face". The horizontal gaze pairs couple the
-/// inward look of one eye with the outward look of the other.
-pub const SYMMETRY: [(&str, &str); 20] = [
-    ("browDownLeft", "browDownRight"),
-    ("browOuterUpLeft", "browOuterUpRight"),
-    ("cheekSquintLeft", "cheekSquintRight"),
-    ("eyeBlinkLeft", "eyeBlinkRight"),
-    ("eyeLookDownLeft", "eyeLookDownRight"),
-    ("eyeLookUpLeft", "eyeLookUpRight"),
-    ("eyeLookInLeft", "eyeLookOutRight"),
-    ("eyeLookOutLeft", "eyeLookInRight"),
-    ("eyeSquintLeft", "eyeSquintRight"),
-    ("eyeWideLeft", "eyeWideRight"),
-    ("jawLeft", "jawRight"),
-    ("mouthDimpleLeft", "mouthDimpleRight"),
-    ("mouthFrownLeft", "mouthFrownRight"),
-    ("mouthLowerDownLeft", "mouthLowerDownRight"),
-    ("mouthPressLeft", "mouthPressRight"),
-    ("mouthSmileLeft", "mouthSmileRight"),
-    ("mouthStretchLeft", "mouthStretchRight"),
-    ("mouthUpperUpLeft", "mouthUpperUpRight"),
-    ("noseSneerLeft", "noseSneerRight"),
-    ("tongueLeft", "tongueRight"),
+/// Symmetry groups: each pair is averaged when its group is symmetric. The horizontal
+/// gaze group couples the inward look of one eye with the outward look of the other.
+pub const SYMMETRY_GROUPS: [(&str, &[(&str, &str)]); 19] = [
+    ("browDown", &[("browDownLeft", "browDownRight")]),
+    ("browOuterUp", &[("browOuterUpLeft", "browOuterUpRight")]),
+    ("cheekSquint", &[("cheekSquintLeft", "cheekSquintRight")]),
+    ("eyeBlink", &[("eyeBlinkLeft", "eyeBlinkRight")]),
+    ("eyeLookDown", &[("eyeLookDownLeft", "eyeLookDownRight")]),
+    ("eyeLookUp", &[("eyeLookUpLeft", "eyeLookUpRight")]),
+    ("eyeLookHorizontal", &[("eyeLookInLeft", "eyeLookOutRight"), ("eyeLookOutLeft", "eyeLookInRight")]),
+    ("eyeSquint", &[("eyeSquintLeft", "eyeSquintRight")]),
+    ("eyeWide", &[("eyeWideLeft", "eyeWideRight")]),
+    ("jaw", &[("jawLeft", "jawRight")]),
+    ("mouthDimple", &[("mouthDimpleLeft", "mouthDimpleRight")]),
+    ("mouthFrown", &[("mouthFrownLeft", "mouthFrownRight")]),
+    ("mouthLowerDown", &[("mouthLowerDownLeft", "mouthLowerDownRight")]),
+    ("mouthPress", &[("mouthPressLeft", "mouthPressRight")]),
+    ("mouthSmile", &[("mouthSmileLeft", "mouthSmileRight")]),
+    ("mouthStretch", &[("mouthStretchLeft", "mouthStretchRight")]),
+    ("mouthUpperUp", &[("mouthUpperUpLeft", "mouthUpperUpRight")]),
+    ("noseSneer", &[("noseSneerLeft", "noseSneerRight")]),
+    ("tongue", &[("tongueLeft", "tongueRight")]),
 ];
+
+/// Groups left out of the global "Symmetric face" switch so sideways jaw and tongue
+/// movement stays independent.
+pub const ASYMMETRIC_BY_DEFAULT: [&str; 2] = ["jaw", "tongue"];
+
+/// Symmetry group a channel belongs to.
+pub fn symmetry_group(index: usize) -> Option<&'static str> {
+    let n = name(index);
+    SYMMETRY_GROUPS.iter().find(|(_, pairs)| pairs.iter().any(|(a, b)| *a == n || *b == n)).map(|(g, _)| *g)
+}
+
+/// The other side of a Left/Right channel, e.g. `eyeBlinkLeft` -> `eyeBlinkRight`.
+pub fn mirror(index: usize) -> Option<usize> {
+    let n = name(index);
+    let other = if let Some(base) = n.strip_suffix("Left") {
+        format!("{base}Right")
+    } else {
+        format!("{}Left", n.strip_suffix("Right")?)
+    };
+    (0..COUNT).find(|&i| name(i) == other)
+}
 
 /// Human readable label, e.g. `eyeLookInLeft` -> `Eye Look In (Left)`.
 pub fn label(index: usize) -> String {

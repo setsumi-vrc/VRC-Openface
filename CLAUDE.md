@@ -1,90 +1,103 @@
 # CLAUDE.md
 
 Guidance for working on VRC Openface: webcam face tracking for VRChat in Rust
-(MediaPipe models on ONNX Runtime → Unified Expressions → OSC).
+(MediaPipe models on ONNX Runtime → calibration → Unified Expressions → OSC).
 
 ## Commands
 
 ```sh
-cargo build --release                       # app: target/release/vrc-openface.exe
-cargo build --release --features directml   # with DirectML GPU inference
-cargo test                                  # unit tests (mapping, OSC binding, OSCQuery parsing)
-cargo clippy --all-targets                  # keep at zero warnings
-cargo fmt                                   # rustfmt.toml: max_width 120
-cargo run --release --example still_image -- face.jpg     # pipeline on a still image, JSON out
+cargo build --release                         # DirectML on by default; --no-default-features for CPU only
+cargo test                                    # mapping, calibration, OSC binding, parsers, interpolation
+cargo clippy --all-targets                    # keep at zero warnings
+cargo fmt                                     # rustfmt.toml: max_width 120
+cargo run --release --example still_image -- face.jpg       # pipeline on a still image, JSON out
 cargo run --release --example camera_check -- 0 640 480 30  # camera mode + measured FPS
-uv run tools/convert_models.py              # regenerate models/*.onnx from Google's .task
+uv run tools/convert_models.py                # regenerate models/*.onnx from Google's .task
 ```
 
-`VRC_OPENFACE_CONFIG=<path>` points the app at a different settings file. Use it for
-tests so the user's real settings are left alone.
+`VRC_OPENFACE_DATA=<folder>` runs the app with its own data folder (settings,
+calibrations, imported models). Use it for manual tests so the user's real data is
+left alone. Note that a running VRChat will receive OSC from any test run.
 
 ## Architecture
 
-The crate is a library (`src/lib.rs`) plus a thin binary (`src/main.rs`). Three threads:
+Library crate (`src/lib.rs`) plus a thin binary (`src/main.rs`). Threads:
 
-- **UI** (`app.rs`, eframe/egui 0.37 with the `App::ui` API): draws from a cloned
-  `Snapshot` and writes `Settings` back into `Shared`.
-- **Tracker** (`tracker.rs`): camera → `FaceLandmarker` → optional tongue →
-  `Processor` → `unified::evaluate_all` → `OscSender`. It publishes a `Snapshot` and
-  asks egui to repaint. UI actions reach it as `Command`s over a crossbeam channel.
-- **OSCQuery** (`oscquery.rs`): browses mDNS for `_oscjson._tcp` instances named
-  `VRChat-Client-*` and polls `GET /avatar` every 2 s. `generation` is bumped on change
-  so the tracker rebinds parameters only when needed.
+- **UI** (`app.rs`, eframe/egui 0.37, `App::ui` API): draws from a cloned `Snapshot`,
+  edits `Settings` and the per-avatar `CalibrationStore` in `Shared`, and saves both
+  every 2 s when they change. It sends `Command`s (capture neutral, undo, gaze, reload
+  models) to the tracker. When idle it stops drawing (`ui_awake`).
+- **Tracker** (`tracker.rs`): camera → `FaceLandmarker` → optional `TongueModel` →
+  `Processor` → `Mapper` → pushes a `Frame` into the output feed and updates `Snapshot`.
+  It also merges avatar information (see below) and records stage timings in `perf.rs`.
+- **Output** (`output.rs`): sends OSC at 100 Hz. With interpolation on, it renders one
+  frame interval in the past and blends the two latest frames; FT off sends
+  `Mapper::neutral()`. `system::high_resolution_timer()` makes the sleeps accurate.
+- **OSCQuery** (`oscquery.rs`): mDNS `_oscjson._tcp` → `GET /avatar` every 2 s.
+- **Receiver** (`avatar.rs`): `/avatar/change` on the receive port (9001), plus
+  `load_config` for VRChat's `LocalLow/VRChat/VRChat/OSC/usr_*/Avatars/<id>.json`
+  (avatar name and parameters when OSCQuery is unavailable).
 
 ### Face pipeline (`src/face/`)
 
-This mirrors MediaPipe's face landmarker graph. When editing, keep these details:
+Mirrors MediaPipe's face landmarker graph:
 
-- `crop_tensor` uses OpenCV `WARP_INVERSE_MAP` semantics: the affine maps destination
-  pixels to source pixels, and pixel centres are on integers.
-- Detector: 128×128 NHWC input in [-1, 1] with a zero border; 896 anchors
-  (16×16×2 + 8×8×6); sigmoid scores ≥ 0.5; weighted merge of boxes with IoU > 0.3
-  against the best box. ROI = 1.5× the box, rotated by the eye keypoints (0 → 1).
-- Landmarks: 256×256 input in [0, 1] with a replicated border. Output 0 is 478×3
-  points, output 1 is a presence **logit** (< 0 means tracking is lost). The next ROI
-  comes from the landmarks: bounding box ×1.5, rotated along landmarks 33 → 263, so the
-  detector runs only after tracking is lost.
-- `LandmarkFilter` is a One-Euro filter whose velocity is normalised by face size
-  (min cutoff 0.05, beta 80, derivative cutoff 1).
-- The blendshape input is 146 filtered landmarks (`BLENDSHAPE_POINTS`) as **pixel** xy.
-  Output is 52 scores, clamped to [0, 1], in `channels::MEDIAPIPE` order (index 0 is
-  `_neutral`).
+- `crop_tensor` uses OpenCV `WARP_INVERSE_MAP` semantics (destination → source, pixel
+  centres on integers).
+- Detector: 128×128 NHWC in [-1, 1], zero border, 896 anchors (16×16×2 + 8×8×6), sigmoid
+  ≥ 0.5, weighted merge at IoU > 0.3. ROI = box ×1.5, rotated by the eye keypoints.
+- Landmarks: 256×256 in [0, 1], replicated border. Output 1 is a presence **logit**
+  (< 0 = lost). The next ROI comes from the landmarks (×1.5, rotated along 33 → 263).
+- `LandmarkFilter`: One-Euro on the landmarks, with velocity normalised by face size.
+- Blendshapes: 146 filtered landmarks (`BLENDSHAPE_POINTS`) as **pixel** xy → 52 scores.
+- `frown_metric`: roll-corrected mouth-corner height vs the inner-lip centre line,
+  relative to mouth width; `processing.rs` maps -0.03…-0.15 to 0…1.
+- Tongue: a square mouth crop turned with the mouth corners and reaching below the lower
+  lip (`Mouth::find`), sampled like the face crops; the model's input sets the crop size and
+  planes (luma or RGB), and its six outputs are the tongue channels.
 - ONNX Runtime allows one environment per process; `face::environment()` shares it.
 
 Validate pipeline changes against the official MediaPipe Python package on the same
-image. The mean absolute blendshape difference was about 0.01 when this was written.
+image (mean blendshape difference ≈ 0.01 when this was written).
 
-### Channels, processing, mapping
+### Processing and mapping
 
-- `channels.rs`: 52 MediaPipe channels followed by 6 tongue channels (`COUNT` = 58),
-  the left/right `SYMMETRY` pairs (horizontal gaze pairs one eye's In with the other
-  eye's Out), and the UI row grouping.
-- `processing.rs`: neutral rescale (skips eye-look and tongue channels), gain,
-  symmetry, One-Euro smoothing, then gaze. Neutral and gaze captures average 45 frames.
-- `unified.rs`: `PARAMS` is the single source of truth for output parameters. Each
-  entry is a `Formula` over channel names, and `dependencies()` derives the green
-  "used" dots in the UI. To add a parameter, add one table entry. The tests check that
-  names are unique and that every dependency resolves.
-- `osc.rs`: `bind()` matches avatar parameters by their name after `v2/` (any prefix,
-  e.g. `FT/v2/`). Float or int parameters become a `Binding::Float`; bools
-  `Name1, Name2, Name4…` (+ `NameNegative`) become a `Binding::Binary`. Values are sent
-  when they change, and everything is re-sent once per second.
+- `channels.rs`: 52 MediaPipe channels + 6 tongue channels (`COUNT` = 58), symmetry
+  groups (jaw and tongue are excluded from the global switch), display rows.
+- `processing.rs`, in order: mesh frown source → One-Euro smoothing (strength 0..1,
+  global or per channel) → per-avatar `ChannelCalibration` (min/max remap or override;
+  L/R linked unless listed in `unlinked`) → symmetry → gaze minus `gaze_center`.
+  Neutral capture averages 45 frames, sets each channel's `min` and keeps an undo copy.
+- `mapping.rs`: `OUTPUTS` is the single source of truth (VRCFT name, friendly name,
+  input channels, formula, signed, cat ears). The order of `inputs` is the order the
+  formula receives values, and dependencies for the UI come from the same list.
+- `osc.rs`: `bind()` matches parameters by their name after `v2/` (any prefix). A
+  `Binding` can have a float address and binary bits at the same time; both are sent.
+  Sends are deduplicated, bundled (≤ 4 KB) and fully repeated once per second.
 
 ### Camera (`camera.rs`)
 
-On Windows, capture uses Media Foundation through the `windows` crate. It ranks
-native modes by fps ≥ requested, then closest area, then MJPG > NV12 > YUY2, and asks
-the source reader (advanced video processing) for RGB32. If the camera only offers
-large modes, the processor scales to the requested width at the native aspect ratio.
-nokhwa's MSMF backend misreported modes and delivered about 12 FPS on a Brio 500, which
-is why it is only used on non-Windows targets.
+Windows uses Media Foundation directly: it ranks native modes (fps ≥ requested, then
+closest area, then MJPG > NV12 > YUY2) and asks the source reader for RGB32, scaled to
+the requested width when the camera only offers large modes. nokhwa is used only on
+other platforms; its MSMF backend misreported modes and delivered about 12 FPS on a Brio 500.
+
+### Other modules
+
+`config.rs` (Settings, data dir, JSON persistence via write-then-rename), `i18n.rs`
+(EN/JA/KO text table; CJK glyphs come from Windows fonts loaded in `app.rs`),
+`theme.rs` (color schemes), `updater.rs` (GitHub releases of this repo; install renames
+files in use to `*.old`, writes new ones and restarts), `system.rs` (DXGI adapters =
+DirectML device ids, private memory, timer resolution).
 
 ## Conventions
 
 - Match the surrounding style: small modules, `anyhow::Result`, `log` macros, no
   `unwrap` on fallible runtime paths, comments that explain *why*.
+- Every user-visible string goes through `i18n::tr` with all three languages.
 - Keep `cargo clippy --all-targets` warning-free and run `cargo fmt` before committing.
-- Never commit `models/tongue_model.onnx` (git-ignored) or other third-party weights.
+- Never commit `tongue_model.onnx` (git-ignored) or other third-party weights.
   `models/*.onnx` must stay reproducible with `tools/convert_models.py`.
-- Commits use the generic identity configured in this repo's local git config.
+- Commits use the generic identity in this repo's local git config.
+- Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/` (without any
+  tongue model), `README.md` and `LICENSE`; the updater requires the exe in the zip.

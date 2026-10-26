@@ -18,10 +18,12 @@ The original models are © Google LLC and distributed under the
 and the [MediaPipe Face Landmarker documentation](https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker)
 for intended use and limitations.
 
-## Optional tongue model
+## Tongue model
 
-No tongue model is included. To enable the Tongue toggle, place a compatible model at
-`models/tongue_model.onnx`:
+No tongue model is included. Use **Import tongue model…** (Settings, or the hint
+in the MediaPipe panel when Tongue is on) to pick a compatible ONNX file. It is copied
+to `%APPDATA%\VRC-Openface\config\models\tongue_model.onnx`, and a
+`models/tongue_model.onnx` next to the executable also works. A compatible model has:
 
 - input `[1, C, S, S]` float: a square crop of the mouth, turned with the mouth corners and
   reaching below the lower lip, with C = 1 (luma) or 3 (RGB) planes in [0, 1]. S is read from

@@ -3,11 +3,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use parking_lot::{Mutex, RwLock};
-
 use vrc_openface::config::Settings;
-use vrc_openface::tracker::{self, Shared, Snapshot};
-use vrc_openface::{app, oscquery};
+use vrc_openface::tracker::{self, Shared, Sources};
+use vrc_openface::{app, avatar, oscquery, output, updater};
 
 /// Models are looked up next to the executable first, then in the working directory,
 /// then in the source tree for `cargo run`.
@@ -27,12 +25,18 @@ fn model_dir() -> PathBuf {
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    updater::cleanup();
 
-    let shared =
-        Arc::new(Shared { settings: RwLock::new(Settings::load()), snapshot: Mutex::new(Snapshot::default()) });
-    let discovery = oscquery::spawn();
+    let settings = Settings::load();
+    let last_avatar = settings.last_avatar_id.clone();
+    let shared = Arc::new(Shared::new(settings));
     let models = model_dir();
     log::info!("models: {}", models.display());
+    let sources = Sources {
+        discovery: oscquery::spawn(),
+        receiver: avatar::spawn_receiver(shared.receive_port.clone(), last_avatar),
+        feed: output::spawn(shared.perf.clone()),
+    };
 
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
@@ -46,8 +50,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            let commands = tracker::spawn(shared.clone(), discovery, models, move || ctx.request_repaint());
-            Ok(Box::new(app::App::new(cc, shared, commands)))
+            let commands = tracker::spawn(shared.clone(), sources, models.clone(), move || ctx.request_repaint());
+            Ok(Box::new(app::App::new(cc, shared, commands, models)))
         }),
     )
 }

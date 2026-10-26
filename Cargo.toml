@@ -1,6 +1,6 @@
 [package]
 name = "vrc-openface"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Webcam face tracking for VRChat: MediaPipe blendshapes to Unified Expressions over OSC"
@@ -13,7 +13,7 @@ name = "vrc-openface"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["directml"]
 directml = ["ort/directml"]
 
 [dependencies]
@@ -30,10 +30,20 @@ parking_lot = "0.13"
 rosc = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-ureq = { version = "3.5", default-features = false }
+rfd = "0.17"
+ureq = "3.5"
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_System_Com"] }
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Media",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
 
 [target.'cfg(not(windows))'.dependencies]
 nokhwa = { version = "0.10", features = ["input-native"] }

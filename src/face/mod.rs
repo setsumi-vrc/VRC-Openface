@@ -254,3 +254,25 @@ impl FaceLandmarker {
         Ok(Some(FaceResult { landmarks, pixel_landmarks: points, blendshapes }))
     }
 }
+
+/// Mesh frown estimate per mouth corner: how far each corner sits above (+) or below (-)
+/// the centre line between the inner lips, relative to mouth width, measured in a frame
+/// rotated so the eyes are level. Returns (left, right) from the user's perspective.
+pub fn frown_metric(points: &[[f32; 3]]) -> Option<(f32, f32)> {
+    if points.len() < LANDMARK_COUNT {
+        return None;
+    }
+    let (right_eye, left_eye) = (points[33], points[263]);
+    let roll = (left_eye[1] - right_eye[1]).atan2(left_eye[0] - right_eye[0]);
+    let (sin, cos) = roll.sin_cos();
+    // Vertical coordinate after removing head roll (image y grows downward).
+    let level = |p: [f32; 3]| -p[0] * sin + p[1] * cos;
+    let (right_corner, left_corner) = (points[61], points[291]);
+    let width = ((left_corner[0] - right_corner[0]).powi(2) + (left_corner[1] - right_corner[1]).powi(2)).sqrt();
+    if width < 1.0 {
+        return None;
+    }
+    let centre = (level(points[13]) + level(points[14])) * 0.5;
+    let metric = |corner: [f32; 3]| (centre - level(corner)) / width;
+    Some((metric(left_corner), metric(right_corner)))
+}
