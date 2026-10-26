@@ -101,6 +101,8 @@ pub struct App {
     texture: Option<TextureHandle>,
     /// GitHub and X marks for the links next to the title.
     links: Vec<(TextureHandle, &'static str)>,
+    /// Flag per language code, for the language menu.
+    flags: Vec<(&'static str, TextureHandle)>,
     texture_seq: u64,
     search: String,
     settings_open: bool,
@@ -132,7 +134,23 @@ pub struct App {
     narrow: bool,
     /// Last tracker frame counted in the interface latencies.
     seen_frame: u64,
+    /// Language the CJK font order was built for.
+    font_language: Language,
 }
+
+/// Flag images by language code (drawn by `tools/make_flags.py`).
+const FLAGS: [(&str, &[u8]); 10] = [
+    ("en", include_bytes!("../assets/flags/en.png")),
+    ("es", include_bytes!("../assets/flags/es.png")),
+    ("pt", include_bytes!("../assets/flags/pt.png")),
+    ("fr", include_bytes!("../assets/flags/fr.png")),
+    ("de", include_bytes!("../assets/flags/de.png")),
+    ("it", include_bytes!("../assets/flags/it.png")),
+    ("ru", include_bytes!("../assets/flags/ru.png")),
+    ("zh", include_bytes!("../assets/flags/zh.png")),
+    ("ja", include_bytes!("../assets/flags/ja.png")),
+    ("ko", include_bytes!("../assets/flags/ko.png")),
+];
 
 fn load_png(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<TextureHandle> {
     let icon = eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("{name} icon: {e}")).ok()?;
@@ -147,20 +165,33 @@ fn dashed_rect(painter: &egui::Painter, rect: Rect, color: Color32) {
     painter.extend(Shape::dashed_line(&corners, Stroke::new(1.0, color), 4.0, 3.0));
 }
 
-/// Adds Windows' Japanese and Korean fonts as fallbacks so every language renders.
-fn load_cjk_fonts(ctx: &egui::Context) {
-    use egui::epaint::text::{FontInsert, FontPriority, InsertFontFamily};
+/// Adds Windows' CJK fonts as fallbacks so every language renders. The font of the selected
+/// language goes first: Han glyphs differ and sit on different baselines between fonts, so
+/// mixing them within one line looks broken.
+fn load_cjk_fonts(ctx: &egui::Context, language: Language) {
     let fonts = std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_default();
-    let japanese = ["YuGothM.ttc", "msgothic.ttc"].iter().find_map(|f| std::fs::read(fonts.join(f)).ok());
-    let korean = std::fs::read(fonts.join("malgun.ttf")).ok();
-    for (name, bytes) in [("japanese", japanese), ("korean", korean)] {
+    let load = |files: &[&str]| files.iter().find_map(|f| std::fs::read(fonts.join(f)).ok());
+    let mut candidates = [
+        ("japanese", load(&["YuGothM.ttc", "msgothic.ttc"])),
+        ("korean", load(&["malgun.ttf"])),
+        ("chinese", load(&["msyh.ttc"])),
+    ];
+    let preferred = match language {
+        Language::Ja => "japanese",
+        Language::Ko => "korean",
+        Language::Zh => "chinese",
+        _ => "",
+    };
+    candidates.sort_by_key(|(name, _)| *name != preferred);
+    let mut definitions = egui::FontDefinitions::default();
+    for (name, bytes) in candidates {
         let Some(bytes) = bytes else { continue };
-        let families = [FontFamily::Proportional, FontFamily::Monospace]
-            .into_iter()
-            .map(|family| InsertFontFamily { family, priority: FontPriority::Lowest })
-            .collect();
-        ctx.add_font(FontInsert { name: name.into(), data: egui::FontData::from_owned(bytes), families });
+        definitions.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+        for family in [FontFamily::Proportional, FontFamily::Monospace] {
+            definitions.families.entry(family).or_default().push(name.into());
+        }
     }
+    ctx.set_fonts(definitions);
 }
 
 fn apply_style(ctx: &egui::Context, pal: &Palette) {
@@ -265,8 +296,9 @@ impl App {
         commands: Sender<Command>,
         model_dir: PathBuf,
     ) -> Self {
-        load_cjk_fonts(&cc.egui_ctx);
         let saved = shared.settings.read().clone();
+        let language = saved.language;
+        load_cjk_fonts(&cc.egui_ctx, language);
         let pal = Palette::of(saved.scheme, &saved.custom_colors);
         Self {
             shared,
@@ -281,6 +313,7 @@ impl App {
             .into_iter()
             .filter_map(|(name, png, url)| Some((load_png(&cc.egui_ctx, name, png)?, url)))
             .collect(),
+            flags: FLAGS.iter().filter_map(|(code, png)| Some((*code, load_png(&cc.egui_ctx, code, png)?))).collect(),
             texture_seq: 0,
             search: String::new(),
             settings_open: false,
@@ -305,6 +338,7 @@ impl App {
             reveal_started: None,
             narrow: false,
             seen_frame: 0,
+            font_language: language,
         }
     }
 
@@ -342,6 +376,53 @@ impl App {
             *on = !*on;
         }
         response
+    }
+
+    fn flag(&self, language: Language) -> Option<egui::Image<'static>> {
+        let (_, texture) = self.flags.iter().find(|(code, _)| *code == language.code())?;
+        Some(egui::Image::new((texture.id(), Vec2::new(24.0, 16.0))))
+    }
+
+    /// Current language with its flag; opens the list of languages.
+    fn language_menu(&self, ui: &mut egui::Ui, s: &mut Settings) {
+        let pal = self.pal;
+        let name = s.language.native_name();
+        let font = FontId::monospace(12.5);
+        let text_width = ui.fonts_mut(|f| f.layout_no_wrap(name.to_string(), font.clone(), pal.text).size().x);
+        let size = Vec2::new(8.0 + 24.0 + 8.0 + text_width + 8.0 + 12.0 + 8.0, 30.0);
+        let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let painter = ui.painter_at(rect.expand(1.0));
+        if response.hovered() {
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.5));
+        }
+        let border = if response.hovered() { pal.dim } else { pal.line };
+        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, border), StrokeKind::Inside);
+        let flag_rect = Rect::from_min_size(rect.left_center() + Vec2::new(8.0, -8.0), Vec2::new(24.0, 16.0));
+        if let Some(flag) = self.flag(s.language) {
+            flag.paint_at(ui, flag_rect);
+        }
+        painter.text(flag_rect.right_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, name, font, pal.text);
+        painter.text(
+            rect.right_center() - Vec2::new(10.0, 0.0),
+            Align2::RIGHT_CENTER,
+            "▾",
+            FontId::monospace(12.0),
+            pal.dim,
+        );
+        egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(190.0);
+            for language in Language::ALL {
+                let text = RichText::new(language.native_name()).size(13.0);
+                let button = match self.flag(language) {
+                    Some(flag) => egui::Button::image_and_text(flag, text),
+                    None => egui::Button::new(text),
+                };
+                if ui.add(button.selected(s.language == language)).clicked() {
+                    s.language = language;
+                }
+            }
+        });
     }
 
     /// Square button showing an image or a glyph: outlined on hover, filled when `on`.
@@ -493,12 +574,7 @@ impl App {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                for language in Language::ALL.iter().rev() {
-                    let mut on = s.language == *language;
-                    if self.toggle(ui, &mut on, language.native_name()).clicked() {
-                        s.language = *language;
-                    }
-                }
+                self.language_menu(ui, s);
                 ui.add_space(8.0);
                 if self
                     .icon_button(ui, Icon::Glyph("🎨"), self.theme_open)
@@ -2096,6 +2172,11 @@ impl eframe::App for App {
         }
         let mut s = self.shared.settings.read().clone();
         let before = s.clone();
+
+        if self.font_language != s.language {
+            load_cjk_fonts(&ctx, s.language);
+            self.font_language = s.language;
+        }
 
         let style_key = (s.scheme, s.custom_colors, s.interface_scale);
         if self.applied_style != Some(style_key) {

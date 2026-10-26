@@ -14,12 +14,17 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ### Added
 - GitHub and X links next to the title.
+- Seven more interface languages: Spanish, Portuguese, French, German, Italian, Russian and
+  Simplified Chinese, next to English, Japanese and Korean.
 - Hover the blurred camera preview for a moment to see the camera unblurred; it blurs
   again after 5 minutes.
 - Narrow layout: when the window (or the space beside the settings panel) is narrow,
   Unified Expressions and Avatar share one column and MediaPipe shows one channel per line.
 
 ### Changed
+- The language is chosen from a dropdown with a flag per language.
+- The CJK font of the selected language is used for the whole line, so Han characters
+  no longer mix fonts with different baselines.
 - Debug performance shows much more: latency bars per path (MediaPipe → OSC, Tongue → OSC,
   tables, preview) split into tracker, core, interface and waiting time; a graph of the
   totals; memory now / change / trend for private bytes and working set; and averages for

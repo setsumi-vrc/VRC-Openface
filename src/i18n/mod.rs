@@ -1,23 +1,86 @@
-//! Interface text in English, Japanese and Korean.
+//! Interface text. English, Japanese and Korean live in the table below; every other
+//! language has its own file with the same keys (a test checks that none is missing).
 
 use serde::{Deserialize, Serialize};
+
+mod de;
+mod es;
+mod fr;
+mod it;
+mod pt;
+mod ru;
+mod zh;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
     #[default]
     En,
+    Es,
+    Pt,
+    Fr,
+    De,
+    It,
+    Ru,
+    Zh,
     Ja,
     Ko,
 }
 
 impl Language {
-    pub const ALL: [Language; 3] = [Language::En, Language::Ja, Language::Ko];
+    pub const ALL: [Language; 10] = [
+        Language::En,
+        Language::Es,
+        Language::Pt,
+        Language::Fr,
+        Language::De,
+        Language::It,
+        Language::Ru,
+        Language::Zh,
+        Language::Ja,
+        Language::Ko,
+    ];
 
     pub fn native_name(self) -> &'static str {
         match self {
-            Language::En => "ENGLISH",
+            Language::En => "English",
+            Language::Es => "Español",
+            Language::Pt => "Português",
+            Language::Fr => "Français",
+            Language::De => "Deutsch",
+            Language::It => "Italiano",
+            Language::Ru => "Русский",
+            Language::Zh => "简体中文",
             Language::Ja => "日本語",
             Language::Ko => "한국어",
+        }
+    }
+
+    /// Two-letter code, also the name of its flag image.
+    pub fn code(self) -> &'static str {
+        match self {
+            Language::En => "en",
+            Language::Es => "es",
+            Language::Pt => "pt",
+            Language::Fr => "fr",
+            Language::De => "de",
+            Language::It => "it",
+            Language::Ru => "ru",
+            Language::Zh => "zh",
+            Language::Ja => "ja",
+            Language::Ko => "ko",
+        }
+    }
+
+    fn table(self) -> Option<&'static [(&'static str, &'static str)]> {
+        match self {
+            Language::Es => Some(es::TEXT),
+            Language::Pt => Some(pt::TEXT),
+            Language::Fr => Some(fr::TEXT),
+            Language::De => Some(de::TEXT),
+            Language::It => Some(it::TEXT),
+            Language::Ru => Some(ru::TEXT),
+            Language::Zh => Some(zh::TEXT),
+            Language::En | Language::Ja | Language::Ko => None,
         }
     }
 }
@@ -290,15 +353,34 @@ const TEXT: &[(&str, &str, &str, &str)] = &[
 ];
 
 pub fn tr(language: Language, key: &str) -> &'static str {
-    TEXT.iter()
-        .find(|(k, ..)| *k == key)
-        .map(|(_, en, ja, ko)| match language {
-            Language::En => *en,
-            Language::Ja => *ja,
-            Language::Ko => *ko,
-        })
-        .unwrap_or_else(|| {
-            debug_assert!(false, "missing text {key}");
-            "?"
-        })
+    let Some((_, en, ja, ko)) = TEXT.iter().find(|(k, ..)| *k == key) else {
+        debug_assert!(false, "missing text {key}");
+        return "?";
+    };
+    match language {
+        Language::En => en,
+        Language::Ja => ja,
+        Language::Ko => ko,
+        other => {
+            other.table().and_then(|table| table.iter().find(|(k, _)| *k == key)).map(|(_, text)| *text).unwrap_or(en)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_language_has_every_text() {
+        for language in Language::ALL {
+            let Some(table) = language.table() else { continue };
+            for (key, ..) in TEXT {
+                assert!(table.iter().any(|(k, _)| k == key), "{language:?} is missing {key}");
+            }
+            for (key, _) in table {
+                assert!(TEXT.iter().any(|(k, ..)| k == key), "{language:?} has unknown {key}");
+            }
+        }
+    }
 }

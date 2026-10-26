@@ -88,6 +88,7 @@ cargo run --release --example camera_check -- 0 640 480 30       # camera mode a
 uv run tools/convert_models.py                                   # rebuild models/*.onnx
 uv run tools/make_icons.py                                       # rebuild the app icon in assets/
 uv run tools/make_link_icons.py                                  # rebuild the GitHub and X marks in assets/
+uv run tools/make_flags.py                                       # rebuild the language flags in assets/flags/
 ```
 
 `VRC_OPENFACE_DATA=<folder>` runs the app with a separate data folder.

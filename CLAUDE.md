@@ -15,6 +15,7 @@ cargo run --release --example camera_check -- 0 640 480 30  # camera mode + meas
 uv run tools/convert_models.py                # regenerate models/*.onnx from Google's .task
 uv run tools/make_icons.py                    # regenerate assets/icon.png and icon.ico
 uv run tools/make_link_icons.py               # regenerate assets/github.png and x.png (top bar links)
+uv run tools/make_flags.py                    # regenerate assets/flags/*.png (language menu)
 ```
 
 `VRC_OPENFACE_DATA=<folder>` runs the app with its own data folder (settings,
@@ -105,8 +106,9 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
 
 ### Other modules
 
-`config.rs` (Settings, data dir, JSON persistence via write-then-rename), `i18n.rs`
-(EN/JA/KO text table; CJK glyphs come from Windows fonts loaded in `app.rs`),
+`config.rs` (Settings, data dir, JSON persistence via write-then-rename), `i18n/`
+(`mod.rs` holds EN/JA/KO, one file per other language; CJK glyphs come from Windows fonts loaded in
+`app.rs`, the selected language's font first),
 `theme.rs` (color schemes), `updater.rs` (GitHub releases of this repo; install renames
 files in use to `*.old`, writes new ones and restarts), `system.rs` (DXGI adapters =
 DirectML device ids, private memory, timer resolution).
@@ -115,7 +117,7 @@ DirectML device ids, private memory, timer resolution).
 
 - Match the surrounding style: small modules, `anyhow::Result`, `log` macros, no
   `unwrap` on fallible runtime paths, comments that explain *why*.
-- Every user-visible string goes through `i18n::tr` with all three languages.
+- Every user-visible string goes through `i18n::tr` with every language (the completeness test fails otherwise).
 - Keep `cargo clippy --all-targets` warning-free and run `cargo fmt` before committing.
 - Never commit `tongue_model.onnx` (git-ignored) or other third-party weights.
   `models/*.onnx` must stay reproducible with `tools/convert_models.py`.
