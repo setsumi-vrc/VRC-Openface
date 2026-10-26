@@ -409,7 +409,7 @@ impl App {
             pal.dim,
         );
         egui::Popup::menu(&response).show(|ui| {
-            ui.set_min_width(190.0);
+            ui.set_width(190.0);
             for language in Language::ALL {
                 let flag = self.flag(language);
                 if self.menu_row(ui, s.language == language, language.native_name(), flag, None).clicked() {
@@ -423,7 +423,7 @@ impl App {
     fn theme_menu(&self, response: &egui::Response, s: &mut Settings) {
         let language = s.language;
         egui::Popup::menu(response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
-            ui.set_min_width(200.0);
+            ui.set_width(210.0);
             for scheme in Scheme::ALL {
                 let swatch = Palette::of(scheme, &s.custom_colors);
                 let label = tr(language, scheme.text_key());
@@ -464,7 +464,7 @@ impl App {
         swatch: Option<(Color32, Color32)>,
     ) -> egui::Response {
         let pal = self.pal;
-        let width = ui.available_width().max(190.0);
+        let width = ui.available_width();
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let (fg, fill) = if selected {
