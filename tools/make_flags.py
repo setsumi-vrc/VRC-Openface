@@ -30,16 +30,35 @@ def stripes(d, colors, vertical=False, weights=None):
         pos += size
 
 
-def uk(d):
-    blue, red, white = (1, 33, 105), (200, 16, 46), (255, 255, 255)
-    d.rectangle([0, 0, BW, BH], fill=blue)
-    for (a, b) in [((0, 0), (BW, BH)), ((0, BH), (BW, 0))]:
-        d.line([a, b], fill=white, width=int(BH * 0.2))
-        d.line([a, b], fill=red, width=int(BH * 0.07))
-    d.rectangle([BW * 0.42, 0, BW * 0.58, BH], fill=white)
-    d.rectangle([0, BH * 0.36, BW, BH * 0.64], fill=white)
-    d.rectangle([BW * 0.455, 0, BW * 0.545, BH], fill=red)
-    d.rectangle([0, BH * 0.41, BW, BH * 0.59], fill=red)
+def usa(d):
+    red, white, blue = (178, 34, 52), (255, 255, 255), (60, 59, 110)
+    stripe = BH / 13
+    for i in range(13):
+        d.rectangle([0, i * stripe, BW, (i + 1) * stripe], fill=red if i % 2 == 0 else white)
+    cw, ch = BW * 0.4, stripe * 7
+    d.rectangle([0, 0, cw, ch], fill=blue)
+    # Fifty stars: nine rows alternating six and five.
+    for row in range(9):
+        count = 6 if row % 2 == 0 else 5
+        for k in range(count):
+            x = cw * (k * 2 + (1 if count == 6 else 2)) / 12
+            y = ch * (row * 2 + 1) / 18
+            star(d, x, y, ch * 0.05, white)
+
+
+def argentina(d):
+    sky, white, sun = (116, 172, 223), (255, 255, 255), (246, 180, 14)
+    stripes(d, [sky, white, sky])
+    cx, cy, r = BW / 2, BH / 2, BH * 0.09
+    for i in range(16):
+        a = i * math.pi / 8
+        inner, outer = r * 1.15, r * (1.9 if i % 2 == 0 else 1.6)
+        d.line(
+            [(cx + inner * math.cos(a), cy + inner * math.sin(a)), (cx + outer * math.cos(a), cy + outer * math.sin(a))],
+            fill=sun,
+            width=int(BH * 0.018),
+        )
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=sun)
 
 
 def brazil(d):
@@ -85,8 +104,8 @@ def korea(d):
 
 
 FLAGS = {
-    "en": uk,
-    "es": lambda d: stripes(d, [(170, 21, 27), (241, 191, 0), (170, 21, 27)], weights=[1, 2, 1]),
+    "en": usa,
+    "es": argentina,
     "pt": brazil,
     "fr": lambda d: stripes(d, [(0, 35, 149), (255, 255, 255), (237, 41, 57)], vertical=True),
     "de": lambda d: stripes(d, [(0, 0, 0), (221, 0, 0), (255, 206, 0)]),

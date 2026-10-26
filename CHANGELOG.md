@@ -22,7 +22,10 @@ Versions follow `MAJOR.MINOR.PATCH`:
   Unified Expressions and Avatar share one column and MediaPipe shows one channel per line.
 
 ### Changed
-- The language is chosen from a dropdown with a flag per language.
+- The language is chosen from a dropdown with a flag per language; rows highlight on hover.
+  English uses the United States flag and Spanish the Argentine one.
+- The color scheme button opens a dropdown of schemes (with the custom colors below it)
+  instead of a separate window.
 - The CJK font of the selected language is used for the whole line, so Han characters
   no longer mix fonts with different baselines.
 - Debug performance shows much more: latency bars per path (MediaPipe → OSC, Tongue → OSC,

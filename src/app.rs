@@ -106,7 +106,6 @@ pub struct App {
     texture_seq: u64,
     search: String,
     settings_open: bool,
-    theme_open: bool,
     expanded: Option<usize>,
     expanded_bindings: BTreeSet<usize>,
     mapper: Mapper,
@@ -317,7 +316,6 @@ impl App {
             texture_seq: 0,
             search: String::new(),
             settings_open: false,
-            theme_open: false,
             expanded: None,
             expanded_bindings: BTreeSet::new(),
             mapper: Mapper::new(),
@@ -413,16 +411,85 @@ impl App {
         egui::Popup::menu(&response).show(|ui| {
             ui.set_min_width(190.0);
             for language in Language::ALL {
-                let text = RichText::new(language.native_name()).size(13.0);
-                let button = match self.flag(language) {
-                    Some(flag) => egui::Button::image_and_text(flag, text),
-                    None => egui::Button::new(text),
-                };
-                if ui.add(button.selected(s.language == language)).clicked() {
+                let flag = self.flag(language);
+                if self.menu_row(ui, s.language == language, language.native_name(), flag, None).clicked() {
                     s.language = language;
                 }
             }
         });
+    }
+
+    /// Color scheme button's dropdown: one row per scheme, then the custom colors.
+    fn theme_menu(&self, response: &egui::Response, s: &mut Settings) {
+        let language = s.language;
+        egui::Popup::menu(response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_min_width(200.0);
+            for scheme in Scheme::ALL {
+                let swatch = Palette::of(scheme, &s.custom_colors);
+                let label = tr(language, scheme.text_key());
+                if self.menu_row(ui, s.scheme == scheme, label, None, Some((swatch.bg, swatch.accent))).clicked() {
+                    s.scheme = scheme;
+                }
+            }
+            if s.scheme == Scheme::Custom {
+                ui.add_space(6.0);
+                let outline = Stroke::new(1.0, self.pal.dim);
+                egui::Grid::new("custom-colors").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
+                    let c = &mut s.custom_colors;
+                    for (key, color) in [
+                        ("theme_background", &mut c.background),
+                        ("theme_panel", &mut c.panel),
+                        ("theme_text", &mut c.text),
+                        ("theme_accent", &mut c.accent),
+                    ] {
+                        ui.label(tr(language, key));
+                        let swatch = ui.color_edit_button_srgb(color);
+                        // Dark colours vanish against the menu without an outline.
+                        ui.painter().rect_stroke(swatch.rect, CornerRadius::ZERO, outline, StrokeKind::Outside);
+                        ui.end_row();
+                    }
+                });
+            }
+        });
+    }
+
+    /// Row of a dropdown list: tinted on hover so the one about to be picked is obvious,
+    /// filled with the accent when it is the current choice.
+    fn menu_row(
+        &self,
+        ui: &mut egui::Ui,
+        selected: bool,
+        label: &str,
+        flag: Option<egui::Image<'static>>,
+        swatch: Option<(Color32, Color32)>,
+    ) -> egui::Response {
+        let pal = self.pal;
+        let width = ui.available_width().max(190.0);
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(width, 28.0), Sense::click());
+        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        let (fg, fill) = if selected {
+            (pal.on_accent, Some(pal.accent))
+        } else if response.hovered() {
+            (pal.text, Some(pal.accent.gamma_multiply(0.4)))
+        } else {
+            (pal.text, None)
+        };
+        let painter = ui.painter();
+        if let Some(fill) = fill {
+            painter.rect_filled(rect, CornerRadius::ZERO, fill);
+        }
+        let icon = Rect::from_min_size(rect.left_center() + Vec2::new(8.0, -8.0), Vec2::new(24.0, 16.0));
+        if let Some(flag) = flag {
+            flag.paint_at(ui, icon);
+        } else if let Some((background, accent)) = swatch {
+            let painter = ui.painter();
+            painter.rect_filled(icon, CornerRadius::ZERO, background);
+            painter.rect_filled(Rect::from_min_max(icon.center_top(), icon.right_bottom()), CornerRadius::ZERO, accent);
+            painter.rect_stroke(icon, CornerRadius::ZERO, Stroke::new(1.0, pal.dim), StrokeKind::Inside);
+        }
+        let font = FontId::monospace(13.0);
+        ui.painter().text(icon.right_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, label, font, fg);
+        response
     }
 
     /// Square button showing an image or a glyph: outlined on hover, filled when `on`.
@@ -576,13 +643,8 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 self.language_menu(ui, s);
                 ui.add_space(8.0);
-                if self
-                    .icon_button(ui, Icon::Glyph("🎨"), self.theme_open)
-                    .on_hover_text(self.t(s, "color_scheme"))
-                    .clicked()
-                {
-                    self.theme_open = !self.theme_open;
-                }
+                let theme = self.icon_button(ui, Icon::Glyph("🎨"), false).on_hover_text(self.t(s, "color_scheme"));
+                self.theme_menu(&theme, s);
                 if self
                     .icon_button(ui, Icon::Glyph("⚙"), self.settings_open)
                     .on_hover_text(self.t(s, "settings"))
@@ -1758,42 +1820,6 @@ impl App {
         });
     }
 
-    fn theme_window(&mut self, ctx: &egui::Context, s: &mut Settings) {
-        let mut open = self.theme_open;
-        let title = self.t(s, "color_scheme");
-        egui::Window::new(title).open(&mut open).resizable(false).collapsible(false).show(ctx, |ui| {
-            let language = s.language;
-            egui::ComboBox::from_id_salt("scheme")
-                .width(200.0)
-                .selected_text(tr(language, s.scheme.text_key()))
-                .show_ui(ui, |ui| {
-                    for scheme in Scheme::ALL {
-                        ui.selectable_value(&mut s.scheme, scheme, tr(language, scheme.text_key()));
-                    }
-                });
-            if s.scheme == Scheme::Custom {
-                ui.add_space(6.0);
-                let outline = Stroke::new(1.0, self.pal.dim);
-                egui::Grid::new("custom-colors").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                    let c = &mut s.custom_colors;
-                    for (key, color) in [
-                        ("theme_background", &mut c.background),
-                        ("theme_panel", &mut c.panel),
-                        ("theme_text", &mut c.text),
-                        ("theme_accent", &mut c.accent),
-                    ] {
-                        ui.label(tr(language, key));
-                        let swatch = ui.color_edit_button_srgb(color);
-                        // Dark colours vanish against the window without an outline.
-                        ui.painter().rect_stroke(swatch.rect, CornerRadius::ZERO, outline, StrokeKind::Outside);
-                        ui.end_row();
-                    }
-                });
-            }
-        });
-        self.theme_open = open;
-    }
-
     fn performance_window(&self, ctx: &egui::Context, s: &mut Settings) {
         let pal = self.pal;
         let perf = self.shared.perf.lock().clone();
@@ -2280,7 +2306,6 @@ impl eframe::App for App {
             // Highlights follow the previous frame's hover; draw once more to catch up.
             ctx.request_repaint();
         }
-        self.theme_window(&ctx, &mut s);
         if s.debug {
             self.performance_window(&ctx, &mut s);
             ctx.request_repaint_after(Duration::from_millis(250));
