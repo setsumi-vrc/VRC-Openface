@@ -1120,6 +1120,9 @@ impl App {
         let to_screen =
             |p: &[f32; 3]| Pos2::new(image.left() + p[0] * image.width(), image.top() + p[1] * image.height());
         if s.show_landmarks {
+            if s.tongue && snapshot.tongue == TongueStatus::Ready && snapshot.landmarks.len() > 291 {
+                self.draw_tongue(&painter, snapshot, &to_screen);
+            }
             let dot = if s.show_camera { pal.accent } else { pal.text };
             for p in &snapshot.landmarks {
                 painter.circle_filled(to_screen(p), 0.9, dot);
@@ -1212,6 +1215,47 @@ impl App {
             .collect();
         painter.add(Shape::line(arc, Stroke::new(3.0, Color32::WHITE)));
         ui.ctx().request_repaint();
+    }
+
+    /// A pink tongue between the lips: its length follows tongueOut, it leans with left and
+    /// right, lifts with up, and narrows with roll.
+    fn draw_tongue(&self, painter: &egui::Painter, snapshot: &Snapshot, to_screen: &dyn Fn(&[f32; 3]) -> Pos2) {
+        let lm = &snapshot.landmarks;
+        let at = |i: usize| to_screen(&lm[i]);
+        let (left, right) = (at(61), at(291));
+        let width = (right - left).length();
+        if width < 4.0 {
+            return;
+        }
+        let across = (right - left) / width;
+        let down = Vec2::new(-across.y, across.x);
+        let first = channels::MEDIAPIPE.len();
+        let v = |i: usize| snapshot.input[first + i].clamp(0.0, 1.0);
+        let (out, to_left, to_right, up, below, roll) = (v(0), v(1), v(2), v(3), v(4), v(5));
+        if out < 0.04 {
+            return;
+        }
+        let base = at(13).lerp(at(14), 0.6);
+        let lift = (1.0 - 1.4 * up + 0.4 * below).clamp(-0.2, 1.1);
+        let dir = (down * lift + across * (to_right - to_left) * 0.7).normalized();
+        let side = Vec2::new(-dir.y, dir.x);
+        let length = width * 0.85 * out;
+        let half = width * 0.17 * (1.0 - 0.45 * roll);
+        let steps = 14;
+        let edge = |k: usize, sign: f32| {
+            let t = k as f32 / steps as f32;
+            base + dir * (length * t) + side * (sign * half * (1.0 - t * t).sqrt())
+        };
+        let mut outline: Vec<Pos2> = (0..=steps).map(|k| edge(k, 1.0)).collect();
+        outline.extend((0..=steps).rev().map(|k| edge(k, -1.0)));
+        let line = Color32::from_rgb(176, 64, 96);
+        painter.add(Shape::convex_polygon(
+            outline,
+            Color32::from_rgba_unmultiplied(236, 112, 144, 235),
+            Stroke::new(1.0, line),
+        ));
+        let groove = [base + dir * (length * 0.1), base + dir * (length * 0.75)];
+        painter.line_segment(groove, Stroke::new(1.0, line.gamma_multiply(0.7)));
     }
 
     /// Two triangles above the forehead whose tilt follows the ear outputs.

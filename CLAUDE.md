@@ -155,5 +155,5 @@ DirectML device ids, private memory, timer resolution).
   settings, calibrations or avatar setups. Record every change under `[Unreleased]` in
   `CHANGELOG.md`; on release, rename that section to the version and date, bump
   `Cargo.toml`, tag `vX.Y.Z` and use the section as the release notes.
-- Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/` (without any
-  tongue model), `README.md` and `LICENSE`; the updater requires the exe in the zip.
+- Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/`, `README.md` and `LICENSE`;
+  the updater requires the exe in the zip.

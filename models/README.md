@@ -20,7 +20,8 @@ for intended use and limitations.
 
 ## Tongue model
 
-No tongue model is included. (A build made with a `models/tongue_model.onnx` present compiles that file in and uses it when none is imported or placed next to the executable.) Use **Import tongue model…** (Settings, or the hint
+No tongue model is included. (A build made with a `models/tongue_model.onnx` present compiles that file in and uses it
+when none is imported or placed next to the executable.) Use **Import tongue model…** (Settings, or the hint
 in the MediaPipe panel when Tongue is on) to pick a compatible ONNX file. It is copied
 to `%APPDATA%\VRC-Openface\config\models\tongue_model.onnx`, and a
 `models/tongue_model.onnx` next to the executable also works. A compatible model has:

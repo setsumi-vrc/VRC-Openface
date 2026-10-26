@@ -12,6 +12,12 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-26
+
+### Added
+- A pink tongue in the camera preview's face landmarks while Tongue is on: its length follows
+  tongueOut, it leans with left and right, lifts with up and narrows with roll.
+
 ## [0.4.0] - 2026-10-26
 
 ### Added
@@ -131,7 +137,8 @@ Versions follow `MAJOR.MINOR.PATCH`:
 - First release: webcam capture, MediaPipe face landmarks and blendshapes on ONNX
   Runtime, Unified Expressions mapping and OSC output to VRChat.
 
-[Unreleased]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/setsumi-vrc/VRC-Openface/compare/v0.1.0...v0.2.0
