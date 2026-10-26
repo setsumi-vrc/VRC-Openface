@@ -1,9 +1,9 @@
-# Regenerates assets/: app icon (png + ico), profile avatar and GitHub social preview.
+# Regenerates the app icon: assets/icon.png and assets/icon.ico.
 # /// script
 # dependencies = ["pillow"]
 # ///
 import math, sys
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 out = sys.argv[1] if len(sys.argv) > 1 else "assets"
 S = 2048  # supersampled canvas
@@ -68,24 +68,4 @@ app = big.resize((1024, 1024), Image.LANCZOS)
 app.save(f"{out}/icon.png")
 app.save(f"{out}/icon.ico", sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
 
-# full-bleed square for profile pictures (cropped to a circle by most sites)
-sq = icon(S, 0, 0.92).resize((1000, 1000), Image.LANCZOS)
-sq.convert("RGB").save(f"{out}/avatar.png")
-
-# GitHub social preview 1280x640
-W, H = 1280, 640
-social = Image.new("RGB", (W, H))
-d = ImageDraw.Draw(social)
-for y in range(H):
-    t = y / H
-    d.line([(0, y), (W, y)], fill=tuple(int(a + (b - a) * t) for a, b in zip(BG_TOP, BG_BOT)))
-logo = big.resize((380, 380), Image.LANCZOS)
-social.paste(logo, (100, 130), logo)
-fonts = "C:/Windows/Fonts/"
-title = ImageFont.truetype(fonts + "consolab.ttf", 92)
-sub = ImageFont.truetype(fonts + "consola.ttf", 30)
-d.text((540, 220), "VRC OPENFACE", font=title, fill=WHITE)
-d.text((544, 340), "Webcam face tracking for VRChat", font=sub, fill=LIGHT)
-d.text((544, 390), "MediaPipe · Unified Expressions · OSC", font=sub, fill=ACCENT)
-social.save(f"{out}/social.png")
 print("ok")

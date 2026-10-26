@@ -26,7 +26,8 @@ use crate::updater::{self, Channel, Release};
 const RESOLUTIONS: [(u32, u32); 4] = [(640, 480), (848, 480), (1280, 720), (1920, 1080)];
 const SCALES: [f32; 6] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5];
 const MAPPING_DOCS: &str = "https://docs.vrcft.io/docs/tutorial-avatars/tutorial-avatars-extras/parameters";
-const ROW_HEIGHT: f32 = 26.0;
+const ROW_HEIGHT: f32 = 30.0;
+const X_PROFILE: &str = "https://x.com/setsumi_vrc";
 
 #[derive(Default)]
 enum UpdateState {
@@ -89,6 +90,8 @@ pub struct App {
     model_dir: PathBuf,
     cameras: Vec<CameraEntry>,
     texture: Option<TextureHandle>,
+    /// GitHub and X marks for the links next to the title.
+    links: Vec<(TextureHandle, &'static str)>,
     texture_seq: u64,
     search: String,
     settings_open: bool,
@@ -109,6 +112,24 @@ pub struct App {
     /// Hover from the previous frame, which decides this frame's highlights.
     hover: Option<Hover>,
     hover_now: Option<Hover>,
+    /// Row positions from the previous frame.
+    prev_rows: Rows,
+    /// While a channel stays hovered: where its expressions were moved to in the
+    /// Unified Expressions list (`None` when they were all visible and stay in place).
+    pulled: Option<(usize, Option<usize>)>,
+}
+
+fn load_png(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<TextureHandle> {
+    let icon = eframe::icon_data::from_png_bytes(png).map_err(|e| log::warn!("{name} icon: {e}")).ok()?;
+    let image = ColorImage::from_rgba_unmultiplied([icon.width as usize, icon.height as usize], &icon.rgba);
+    Some(ctx.load_texture(name, image, TextureOptions::LINEAR))
+}
+
+/// Dashed outline used for panels and channel groups.
+fn dashed_rect(painter: &egui::Painter, rect: Rect, color: Color32) {
+    let r = rect.shrink(0.5);
+    let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+    painter.extend(Shape::dashed_line(&corners, Stroke::new(1.0, color), 4.0, 3.0));
 }
 
 /// Adds Windows' Japanese and Korean fonts as fallbacks so every language renders.
@@ -234,6 +255,13 @@ impl App {
             model_dir,
             cameras: camera::list(),
             texture: None,
+            links: [
+                ("github", include_bytes!("../assets/github.png").as_slice(), env!("CARGO_PKG_REPOSITORY")),
+                ("x", include_bytes!("../assets/x.png").as_slice(), X_PROFILE),
+            ]
+            .into_iter()
+            .filter_map(|(name, png, url)| Some((load_png(&cc.egui_ctx, name, png)?, url)))
+            .collect(),
             texture_seq: 0,
             search: String::new(),
             settings_open: false,
@@ -253,6 +281,8 @@ impl App {
             rows: Rows::default(),
             hover: None,
             hover_now: None,
+            prev_rows: Rows::default(),
+            pulled: None,
         }
     }
 
@@ -322,7 +352,7 @@ impl App {
     }
 
     fn panel_frame(&self) -> Frame {
-        Frame::new().stroke(Stroke::new(1.0, self.pal.line)).fill(self.pal.panel).inner_margin(Margin::same(8))
+        Frame::new().fill(self.pal.bg).inner_margin(Margin::same(8))
     }
 
     fn update_texture(&mut self, ctx: &egui::Context, snapshot: &Snapshot) {
@@ -365,6 +395,16 @@ impl App {
             self.toggle(ui, &mut s.ft_output, power).on_hover_text(hint);
             ui.add_space(8.0);
             ui.label(RichText::new("VRC OPENFACE").heading().strong());
+            ui.add_space(10.0);
+            for (texture, url) in &self.links {
+                let image =
+                    egui::Image::new((texture.id(), Vec2::splat(18.0))).tint(self.pal.text).sense(Sense::click());
+                let link = ui.add(image).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(*url);
+                if link.clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(*url));
+                }
+                ui.add_space(4.0);
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 for language in Language::ALL.iter().rev() {
                     let mut on = s.language == *language;
@@ -587,6 +627,56 @@ impl App {
         used
     }
 
+    /// Order of the Unified Expressions list. When the hovered channel feeds expressions
+    /// that are not all in view, they are taken out and put back as one block lined up
+    /// with the channel's row. The decision is kept while the
+    /// channel stays hovered, otherwise the moved rows would count as visible next frame.
+    /// Returns the order and the positions of the block in it.
+    fn pull_related(&mut self, shown: &[usize], content_top: f32) -> (Vec<usize>, std::ops::Range<usize>) {
+        let Some(Hover::Channel(c)) = self.hover_now else {
+            self.pulled = None;
+            return (shown.to_vec(), 0..0);
+        };
+        let feeds = |o: &usize| self.mapper.dependencies(*o).contains(&c);
+        let related: Vec<usize> = shown.iter().copied().filter(feeds).collect();
+        let rest: Vec<usize> = shown.iter().copied().filter(|o| !feeds(o)).collect();
+        let at = match self.pulled {
+            Some((pulled, at)) if pulled == c => at,
+            _ => {
+                let view = self.prev_rows.view[1];
+                let in_view = related.iter().all(|o| {
+                    self.prev_rows
+                        .outputs
+                        .iter()
+                        .any(|(i, r)| i == o && r.top() >= view.top() - 0.5 && r.bottom() <= view.bottom() + 0.5)
+                });
+                let y = self.rows.channels.iter().find(|(i, _)| *i == c).map(|(_, r)| r.center().y);
+                let at = match y {
+                    Some(y) if !in_view && !related.is_empty() => {
+                        let n = related.len() as f32;
+                        let index = (y - content_top) / ROW_HEIGHT - n / 2.0;
+                        // Keep the whole block inside the visible part of the list.
+                        let first = ((view.top() - content_top) / ROW_HEIGHT).ceil();
+                        let last = ((view.bottom() - content_top) / ROW_HEIGHT).floor() - n;
+                        Some(index.round().min(last).max(first).max(0.0) as usize)
+                    }
+                    _ => None,
+                };
+                self.pulled = Some((c, at));
+                at
+            }
+        };
+        match at {
+            Some(at) => {
+                let at = at.min(rest.len());
+                let mut order = rest;
+                order.splice(at..at, related.iter().copied());
+                (order, at..at + related.len())
+            }
+            None => (shown.to_vec(), 0..0),
+        }
+    }
+
     fn channel_label(&self, s: &Settings, index: usize) -> String {
         if s.friendly_names { channels::label(index) } else { channels::name(index).to_string() }
     }
@@ -607,13 +697,13 @@ impl App {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click());
         let painter = ui.painter_at(rect);
         if response.hovered() || highlight {
-            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.35));
+            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.45));
         }
         let color = if used { pal.text } else { pal.dim };
         // Room for the value on the right and the markers after the name.
         let galley =
-            truncated(&painter, self.channel_label(s, index), FontId::monospace(12.0), color, rect.width() - 80.0);
-        let text_pos = rect.left_center() + Vec2::new(4.0, -galley.size().y / 2.0);
+            truncated(&painter, self.channel_label(s, index), FontId::monospace(12.5), color, rect.width() - 90.0);
+        let text_pos = rect.left_center() + Vec2::new(10.0, -galley.size().y / 2.0);
         let text_right = text_pos.x + galley.size().x;
         painter.galley(text_pos, galley, color);
         let mut x = text_right + 7.0;
@@ -629,18 +719,13 @@ impl App {
         }
         let value = snapshot.values[index];
         painter.text(
-            rect.right_center() - Vec2::new(6.0, 0.0),
+            rect.right_center() - Vec2::new(10.0, 0.0),
             Align2::RIGHT_CENTER,
             percent(value),
-            FontId::monospace(11.0),
+            FontId::monospace(11.5),
             pal.dim,
         );
-        let bar = Rect::from_min_size(
-            rect.left_bottom() - Vec2::new(0.0, 2.0),
-            Vec2::new(rect.width() * value.clamp(0.0, 1.0), 1.5),
-        );
-        painter.rect_filled(bar, CornerRadius::ZERO, color);
-        painter.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, pal.line.gamma_multiply(0.5)));
+        row_separator(&painter, rect, &pal);
         response.on_hover_text(format!(
             "{} · {} {}",
             channels::name(index),
@@ -656,6 +741,8 @@ impl App {
         let calibration = store.avatars.entry(avatar.to_string()).or_default();
         let mut changed = false;
         Frame::new().fill(pal.bg).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin::same(8)).show(ui, |ui| {
+            // The channel list lays rows out without spacing; the editor needs the normal gaps.
+            ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
             ui.horizontal_wrapped(|ui| {
                 if members.len() > 1 {
                     let mut linked = calibration.linked(members[0]);
@@ -823,7 +910,10 @@ impl App {
             ui.separator();
             egui::ScrollArea::vertical().id_salt("mp").auto_shrink([false, false]).show(ui, |ui| {
                 self.rows.view[0] = ui.clip_rect();
-                let half = (ui.available_width() - 6.0) / 2.0;
+                // Rows touch, like table lines; each group gets a dashed box.
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let full = ui.available_width();
+                let half = (full / 2.0).floor();
                 for group in channels::display_rows() {
                     let rows: Vec<_> = group
                         .into_iter()
@@ -839,12 +929,13 @@ impl App {
                     if rows.is_empty() {
                         continue;
                     }
+                    let group_top = ui.cursor().top();
                     for (l, r) in rows {
                         let clicked = ui
                             .horizontal(|ui| {
                                 let cells: Vec<(usize, f32)> = match r {
-                                    Some(r) => vec![(l, half), (r, half)],
-                                    None => vec![(l, half * 2.0 + 6.0)],
+                                    Some(r) => vec![(l, half), (r, full - half)],
+                                    None => vec![(l, full)],
                                 };
                                 let mut clicked = false;
                                 for (i, width) in cells {
@@ -856,6 +947,10 @@ impl App {
                                         self.hover_now = Some(Hover::Channel(i));
                                     }
                                     clicked |= cell.clicked();
+                                    if width == half {
+                                        let divider = Stroke::new(1.0, self.pal.line.gamma_multiply(0.6));
+                                        ui.painter().vline(cell.rect.right(), cell.rect.y_range(), divider);
+                                    }
                                 }
                                 clicked
                             })
@@ -868,11 +963,17 @@ impl App {
                             self.row_editor(ui, s, snapshot, &members, &avatar);
                         }
                     }
-                    ui.add_space(8.0);
+                    let group = Rect::from_min_max(
+                        Pos2::new(ui.max_rect().left(), group_top),
+                        Pos2::new(ui.max_rect().left() + full, ui.cursor().top()),
+                    );
+                    dashed_rect(ui.painter(), group, self.pal.line);
+                    ui.add_space(10.0);
                 }
             });
         });
         self.rows.frame[0] = frame.response.rect;
+        dashed_rect(ui.painter(), frame.response.rect, self.pal.line);
     }
 
     fn unified_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
@@ -902,26 +1003,47 @@ impl App {
             ui.separator();
             egui::ScrollArea::vertical().id_salt("ue").auto_shrink([false, false]).show(ui, |ui| {
                 self.rows.view[1] = ui.clip_rect();
-                for &i in &visible {
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
+                let shown: Vec<usize> = visible
+                    .iter()
+                    .copied()
+                    .filter(|&i| {
+                        let output = &OUTPUTS[i];
+                        let is_bound = known && snapshot.bindings.get(i).is_some_and(Option::is_some);
+                        (s.show_unused || !known || is_bound)
+                            && (self.matches(output.name) || self.matches(output.friendly))
+                    })
+                    .collect();
+                let content_top = ui.max_rect().top();
+                let (order, block) = self.pull_related(&shown, content_top);
+                let mut block_rect = Rect::NOTHING;
+                for (n, &i) in order.iter().enumerate() {
                     let output = &OUTPUTS[i];
                     let is_bound = known && snapshot.bindings.get(i).is_some_and(Option::is_some);
-                    if (!s.show_unused && known && !is_bound)
-                        || !(self.matches(output.name) || self.matches(output.friendly))
-                    {
-                        continue;
-                    }
                     let value = snapshot.outputs.get(i).copied().unwrap_or_default();
                     let text = output.label(s.friendly_names);
                     let row = value_row(ui, &pal, text, value, is_bound || !known, None, related.outputs[i]);
+                    if block.contains(&n) {
+                        block_rect = block_rect.union(row.rect);
+                    }
                     self.rows.outputs.push((i, row.rect));
                     if row.hovered() {
                         self.hover_now = Some(Hover::Output(i));
                     }
                     row.on_hover_text(output.name);
                 }
+                if block_rect.is_positive() {
+                    ui.painter().rect_stroke(
+                        block_rect,
+                        CornerRadius::ZERO,
+                        Stroke::new(1.0, pal.dim),
+                        StrokeKind::Inside,
+                    );
+                }
             });
         });
         self.rows.frame[1] = frame.response.rect;
+        dashed_rect(ui.painter(), frame.response.rect, self.pal.line);
     }
 
     fn avatar_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
@@ -956,6 +1078,7 @@ impl App {
             ui.separator();
             egui::ScrollArea::vertical().id_salt("avatar").auto_shrink([false, false]).show(ui, |ui| {
                 self.rows.view[2] = ui.clip_rect();
+                ui.spacing_mut().item_spacing = Vec2::ZERO;
                 if !known {
                     ui.add_space(12.0);
                     ui.vertical_centered(|ui| {
@@ -1018,17 +1141,17 @@ impl App {
             });
         });
         self.rows.frame[2] = frame.response.rect;
+        dashed_rect(ui.painter(), frame.response.rect, self.pal.line);
     }
 
-    /// Lines from the hovered row to the rows it feeds or is fed by. Hovering a MediaPipe
-    /// channel also lays its Unified Expressions over that panel next to the channel, so
-    /// they are visible however the list is scrolled.
-    fn draw_links(&self, ui: &egui::Ui, s: &Settings, snapshot: &Snapshot) {
+    /// Lines from the hovered row to the rows it feeds or is fed by (see `pull_related` for
+    /// how a channel's expressions are brought into view).
+    fn draw_links(&self, ui: &egui::Ui) {
         let Some(hover) = self.hover_now else { return };
         let (pal, rows) = (self.pal, &self.rows);
         let [mp, ue, avatar] = rows.frame;
         let painter = ui.painter();
-        let stroke = Stroke::new(1.0, pal.text.gamma_multiply(0.7));
+        let stroke = Stroke::new(1.0, pal.text.gamma_multiply(0.85));
         let link = |a: Pos2, b: Pos2| painter.line_segment([a, b], stroke);
         let to_avatar = |output: usize, y: f32| {
             if let Some(ay) = Rows::y(&rows.avatar, output, rows.view[2]) {
@@ -1038,32 +1161,11 @@ impl App {
         match hover {
             Hover::Channel(c) => {
                 let Some(y) = Rows::y(&rows.channels, c, rows.view[0]) else { return };
-                let outputs: Vec<(usize, Rect)> =
-                    rows.outputs.iter().filter(|(o, _)| self.mapper.dependencies(*o).contains(&c)).copied().collect();
-                let Some((_, first)) = outputs.first() else { return };
-                let view = rows.view[1];
-                let height = outputs.len() as f32 * ROW_HEIGHT;
-                let top = (y - height / 2.0).min(view.bottom() - height).max(view.top());
-                let (left, width) = (first.left(), first.width());
-                let block = Rect::from_min_size(Pos2::new(left, top), Vec2::new(width, height));
-                let overlay = painter.with_clip_rect(ue);
-                overlay.rect_filled(block.expand(3.0), CornerRadius::ZERO, pal.panel);
-                overlay.rect_stroke(
-                    block.expand(3.0),
-                    CornerRadius::ZERO,
-                    Stroke::new(1.0, pal.dim),
-                    StrokeKind::Inside,
-                );
-                let known = Self::avatar_known(snapshot);
-                for (k, (o, _)) in outputs.iter().enumerate() {
-                    let row =
-                        Rect::from_min_size(Pos2::new(left, top + k as f32 * ROW_HEIGHT), Vec2::new(width, ROW_HEIGHT));
-                    let active = !known || snapshot.bindings.get(*o).is_some_and(Option::is_some);
-                    let value = snapshot.outputs.get(*o).copied().unwrap_or_default();
-                    let name = OUTPUTS[*o].label(s.friendly_names);
-                    paint_value_row(&overlay, row, &pal, name, value, active, None, true);
-                    link(Pos2::new(mp.right(), y), Pos2::new(ue.left(), row.center().y));
-                    to_avatar(*o, row.center().y);
+                for (o, _) in rows.outputs.iter().filter(|(o, _)| self.mapper.dependencies(*o).contains(&c)) {
+                    if let Some(oy) = Rows::y(&rows.outputs, *o, rows.view[1]) {
+                        link(Pos2::new(mp.right(), y), Pos2::new(ue.left(), oy));
+                        to_avatar(*o, oy);
+                    }
                 }
             }
             Hover::Output(o) | Hover::Avatar(o) => {
@@ -1524,8 +1626,8 @@ fn graph(ui: &mut egui::Ui, pal: &Palette, points: &[(f32, f32)], span: f32, flo
     painter.add(Shape::line(line, Stroke::new(1.2, pal.accent)));
 }
 
-/// Parameter row: name, value and a bar (centred for signed values). `bits` draws a
-/// binary encoding as boxes.
+/// Parameter row: name and value, as one line of a table. `bits` draws a binary
+/// encoding as boxes.
 fn value_row(
     ui: &mut egui::Ui,
     pal: &Palette,
@@ -1553,13 +1655,13 @@ fn paint_value_row(
     highlight: bool,
 ) {
     if highlight {
-        painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.35));
+        painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.45));
     }
     let color = if active { pal.text } else { pal.dim };
-    let reserved = 52.0 + bits.map_or(0.0, |b| b.len() as f32 * 11.0 + 4.0);
-    let galley = truncated(painter, name.to_string(), FontId::monospace(12.0), color, rect.width() - reserved);
-    painter.galley(rect.left_center() + Vec2::new(4.0, -galley.size().y / 2.0), galley, color);
-    let mut right = rect.right() - 6.0;
+    let reserved = 64.0 + bits.map_or(0.0, |b| b.len() as f32 * 11.0 + 4.0);
+    let galley = truncated(painter, name.to_string(), FontId::monospace(12.5), color, rect.width() - reserved);
+    painter.galley(rect.left_center() + Vec2::new(10.0, -galley.size().y / 2.0), galley, color);
+    let mut right = rect.right() - 10.0;
     if let Some(bits) = bits {
         for &on in bits.iter().rev() {
             let b = Rect::from_center_size(Pos2::new(right - 4.0, rect.center().y), Vec2::splat(8.0));
@@ -1576,18 +1678,16 @@ fn paint_value_row(
         Pos2::new(right, rect.center().y),
         Align2::RIGHT_CENTER,
         percent(value),
-        FontId::monospace(11.0),
+        FontId::monospace(11.5),
         pal.dim,
     );
-    let mid = rect.center().x;
-    let bar = if value >= 0.0 {
-        Rect::from_min_size(Pos2::new(rect.left(), rect.bottom() - 2.0), Vec2::new(rect.width() * value.min(1.0), 1.5))
-    } else {
-        let w = rect.width() * 0.5 * (-value).min(1.0);
-        Rect::from_min_size(Pos2::new(mid - w, rect.bottom() - 2.0), Vec2::new(w, 1.5))
-    };
-    painter.rect_filled(bar, CornerRadius::ZERO, color);
-    painter.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, pal.line.gamma_multiply(0.5)));
+    row_separator(painter, rect, pal);
+}
+
+/// Thin line under a table row.
+fn row_separator(painter: &egui::Painter, rect: Rect, pal: &Palette) {
+    let y = rect.bottom() - 0.5;
+    painter.hline(rect.x_range(), y, Stroke::new(1.0, pal.line.gamma_multiply(0.6)));
 }
 
 impl eframe::App for App {
@@ -1626,7 +1726,7 @@ impl eframe::App for App {
         let snapshot = self.shared.snapshot.lock().clone();
         self.update_texture(&ctx, &snapshot);
         self.hover = self.hover_now.take();
-        self.rows = Rows::default();
+        self.prev_rows = std::mem::take(&mut self.rows);
 
         let bar = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 10));
         egui::Panel::top("top").frame(bar).show(ui, |ui| self.top_bar(ui, &mut s));
@@ -1669,7 +1769,7 @@ impl eframe::App for App {
                     self.avatar_panel(ui, &mut s, &snapshot);
                 });
             });
-            self.draw_links(ui, &s, &snapshot);
+            self.draw_links(ui);
         });
         if self.hover_now != self.hover {
             // Highlights follow the previous frame's hover; draw once more to catch up.

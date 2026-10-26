@@ -86,7 +86,8 @@ cargo clippy --all-targets
 cargo run --release --example still_image -- path/to/face.jpg   # blendshapes as JSON
 cargo run --release --example camera_check -- 0 640 480 30       # camera mode and real FPS
 uv run tools/convert_models.py                                   # rebuild models/*.onnx
-uv run tools/make_icons.py                                       # rebuild assets/ (icon, avatar, social preview)
+uv run tools/make_icons.py                                       # rebuild the app icon in assets/
+uv run tools/make_link_icons.py                                  # rebuild the GitHub and X marks in assets/
 ```
 
 `VRC_OPENFACE_DATA=<folder>` runs the app with a separate data folder.

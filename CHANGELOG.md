@@ -12,6 +12,16 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+### Added
+- GitHub and X links next to the title.
+
+### Changed
+- New look for the parameter panels: dashed outlines, table rows with
+  separators, and each MediaPipe group in its own box.
+- Hovering a MediaPipe channel no longer opens a floating box. Its Unified Expressions
+  are linked where they are; when some are scrolled out of view, they move into one block
+  in the list next to the channel, always fully visible.
+
 ## [0.3.0] - 2026-10-26
 
 ### Added

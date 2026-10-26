@@ -13,7 +13,8 @@ cargo fmt                                     # rustfmt.toml: max_width 120
 cargo run --release --example still_image -- face.jpg       # pipeline on a still image, JSON out
 cargo run --release --example camera_check -- 0 640 480 30  # camera mode + measured FPS
 uv run tools/convert_models.py                # regenerate models/*.onnx from Google's .task
-uv run tools/make_icons.py                    # regenerate assets/ (icon.png/.ico, avatar, social preview)
+uv run tools/make_icons.py                    # regenerate assets/icon.png and icon.ico
+uv run tools/make_link_icons.py               # regenerate assets/github.png and x.png (top bar links)
 ```
 
 `VRC_OPENFACE_DATA=<folder>` runs the app with its own data folder (settings,
@@ -88,9 +89,15 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
 - Panel headers go through `header()`: title on the left (truncated), controls on the
   right, added right-to-left. Never let a right-to-left row overflow: it pushes the whole
   panel off the left edge. `header()` wraps the controls instead.
+- Panel style: dashed outlines (`dashed_rect`), table rows with
+  separators and no spacing between them, MediaPipe groups in dashed boxes.
 - Panel links: each frame records row rects in `Rows` and the hovered row in
   `hover_now`; highlights use the previous frame's `hover`, and `draw_links` paints the
-  lines (and the expression overlay for a hovered channel) after the three panels.
+  lines after the three panels. When a hovered channel's expressions are not all in
+  view, `pull_related` moves them into one block in the list next to the channel. The
+  decision is kept while that channel stays hovered (`pulled`), otherwise it flickers.
+- The MediaPipe panel is drawn first, so `hover_now` already holds a hovered channel
+  when the Unified Expressions list is laid out.
 - Use `min().max()` rather than `f32::clamp` with bounds taken from layout rects; empty
   rects (min > max) make `clamp` panic.
 - The window icon is `assets/icon.png`; `build.rs` embeds `assets/icon.ico` in the exe
