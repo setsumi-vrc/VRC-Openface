@@ -78,6 +78,15 @@ fn environment() -> Result<&'static ort::environment::Environment> {
 }
 
 pub fn create_session(path: &Path, gpu_device: Option<i32>) -> Result<Session> {
+    session_builder(gpu_device)?.commit_from_file(path).with_context(|| format!("loading model {}", path.display()))
+}
+
+/// A model compiled into the executable.
+pub fn create_session_from_memory(bytes: &[u8], gpu_device: Option<i32>) -> Result<Session> {
+    session_builder(gpu_device)?.commit_from_memory(bytes).context("loading the built-in model")
+}
+
+fn session_builder(gpu_device: Option<i32>) -> Result<ort::session::builder::SessionBuilder> {
     let mut builder = Session::builder(environment()?)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_intra_threads(2)
@@ -91,7 +100,7 @@ pub fn create_session(path: &Path, gpu_device: Option<i32>) -> Result<Session> {
     if let Some(device) = gpu_device {
         builder = with_gpu(builder, device)?;
     }
-    builder.commit_from_file(path).with_context(|| format!("loading model {}", path.display()))
+    Ok(builder)
 }
 
 #[cfg(feature = "directml")]

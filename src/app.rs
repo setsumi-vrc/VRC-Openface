@@ -15,18 +15,27 @@ use crate::camera::{self, CameraEntry};
 use crate::channels::{self, COUNT};
 use crate::config::{self, Device, IDLE_MINUTES, Settings};
 use crate::i18n::{Language, tr};
+use crate::icons::{self, Glyph};
 use crate::mapping::{Mapper, OUTPUTS};
 use crate::osc::Binding;
 use crate::perf::{self, Group, Path, Segment, Stage};
 use crate::processing::{self, ChannelCalibration, Source};
-use crate::theme::{CustomColors, Palette, Scheme};
+use crate::theme::{CustomColors, Palette, Scheme, mix};
 use crate::tracker::{self, Command, Shared, Snapshot, Status, TongueStatus};
 use crate::updater::{self, Channel, Release};
+use crate::widgets::{self, Button, Icon, Look};
 
 const RESOLUTIONS: [(u32, u32); 4] = [(640, 480), (848, 480), (1280, 720), (1920, 1080)];
 const SCALES: [f32; 6] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5];
 const MAPPING_DOCS: &str = "https://docs.vrcft.io/docs/tutorial-avatars/tutorial-avatars-extras/parameters";
 const ROW_HEIGHT: f32 = 30.0;
+const SIDEBAR_WIDTH: f32 = 340.0;
+/// Smallest window the layout holds together in.
+pub const MIN_WINDOW: Vec2 = Vec2::new(1060.0, 660.0);
+/// Width of the strip along the window edge that starts a resize (the window has no frame).
+const RESIZE_BAND: f32 = 5.0;
+/// How long a row stays hovered before the rows linked to it scroll into view.
+const REVEAL_AFTER: Duration = Duration::from_millis(250);
 const X_PROFILE: &str = "https://x.com/setsumi_vrc";
 /// How long the pointer rests on a blurred preview before it is shown unblurred, and
 /// for how long.
@@ -80,11 +89,15 @@ impl Rows {
     fn y(list: &[(usize, Rect)], index: usize, view: Rect) -> Option<f32> {
         list.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center().y.min(view.bottom()).max(view.top()))
     }
-}
 
-enum Icon<'a> {
-    Image(egui::TextureId),
-    Glyph(&'a str),
+    /// Which way a row lies when it is scrolled out of its panel: -1 above, 1 below, 0 in view.
+    fn off(list: &[(usize, Rect)], index: usize, view: Rect) -> f32 {
+        match list.iter().find(|(i, _)| *i == index).map(|(_, r)| r.center().y) {
+            Some(y) if y > view.bottom() => 1.0,
+            Some(y) if y < view.top() => -1.0,
+            _ => 0.0,
+        }
+    }
 }
 
 /// Rows connected to the hovered one, highlighted in every panel.
@@ -99,7 +112,11 @@ pub struct App {
     model_dir: PathBuf,
     cameras: Vec<CameraEntry>,
     texture: Option<TextureHandle>,
-    /// GitHub and X marks for the links next to the title.
+    /// App icon shown next to the title.
+    mark: Option<TextureHandle>,
+    /// The restored window size was checked against `MIN_WINDOW`.
+    size_checked: bool,
+    /// GitHub and X marks for the links in the settings.
     links: Vec<(TextureHandle, &'static str)>,
     /// Flag per language code, for the language menu.
     flags: Vec<(&'static str, TextureHandle)>,
@@ -126,7 +143,10 @@ pub struct App {
     prev_rows: Rows,
     /// While a channel stays hovered: where its expressions were moved to in the
     /// Unified Expressions list (`None` when they were all visible and stay in place).
-    pulled: Option<(usize, Option<usize>)>,
+    /// The hovered row and since when, so linked rows only scroll into view on a pause.
+    dwell: (Option<Hover>, Instant),
+    /// Per panel, a row was already scrolled into view for the hovered row.
+    revealed: [bool; 3],
     /// When the pointer started resting on the blurred preview.
     reveal_started: Option<Instant>,
     /// Narrow layout: Unified Expressions above Avatar instead of side by side.
@@ -159,52 +179,92 @@ fn load_png(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<TextureHandle
     Some(ctx.load_texture(name, image, TextureOptions::LINEAR))
 }
 
-/// Dashed outline used for panels and channel groups.
-fn dashed_rect(painter: &egui::Painter, rect: Rect, color: Color32) {
-    let r = rect.shrink(0.5);
-    let corners = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
-    painter.extend(Shape::dashed_line(&corners, Stroke::new(1.0, color), 4.0, 3.0));
-}
-
-/// Adds Windows' CJK fonts as fallbacks so every language renders. The font of the selected
-/// language goes first: Han glyphs differ and sit on different baselines between fonts, so
-/// mixing them within one line looks broken.
-fn load_cjk_fonts(ctx: &egui::Context, language: Language) {
+/// Loads the interface fonts: Segoe UI (regular and semibold, found on every Windows) for the
+/// Latin and Cyrillic text, and Windows' CJK fonts as fallbacks so every language renders. For
+/// Japanese, Korean and Chinese the CJK font of that language goes first: Han glyphs differ and
+/// sit on different baselines between fonts, so mixing them within one line looks broken.
+fn load_fonts(ctx: &egui::Context, language: Language) {
     let fonts = std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_default();
     let load = |files: &[&str]| files.iter().find_map(|f| std::fs::read(fonts.join(f)).ok());
-    let mut candidates = [
-        ("japanese", load(&["YuGothM.ttc", "msgothic.ttc"])),
-        ("korean", load(&["malgun.ttf"])),
-        ("chinese", load(&["msyh.ttc"])),
-    ];
     let preferred = match language {
         Language::Ja => "japanese",
         Language::Ko => "korean",
         Language::Zh => "chinese",
         _ => "",
     };
+    let mut candidates = [
+        ("japanese", load(&["YuGothM.ttc", "msgothic.ttc"])),
+        ("korean", load(&["malgun.ttf"])),
+        ("chinese", load(&["msyh.ttc"])),
+    ];
     candidates.sort_by_key(|(name, _)| *name != preferred);
     let mut definitions = egui::FontDefinitions::default();
+    let defaults = |family: &FontFamily, definitions: &egui::FontDefinitions| {
+        definitions.families.get(family).cloned().unwrap_or_default()
+    };
+    let (default_proportional, default_monospace) =
+        (defaults(&FontFamily::Proportional, &definitions), defaults(&FontFamily::Monospace, &definitions));
+
+    let mut cjk = Vec::new();
     for (name, bytes) in candidates {
         let Some(bytes) = bytes else { continue };
         definitions.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
-        for family in [FontFamily::Proportional, FontFamily::Monospace] {
-            definitions.families.entry(family).or_default().push(name.into());
+        cjk.push(name.to_string());
+    }
+    let mut ui_fonts = Vec::new();
+    for (name, files) in [("ui", ["segoeui.ttf"]), ("ui-semibold", ["seguisb.ttf"])] {
+        if let Some(bytes) = load(&files) {
+            definitions.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+            ui_fonts.push(name);
         }
+    }
+    let first_cjk = cjk.first().filter(|name| name.as_str() == preferred).cloned();
+    let build = |ui_font: Option<&str>, base: &[String]| {
+        let mut list: Vec<String> = Vec::new();
+        list.extend(first_cjk.clone());
+        list.extend(ui_font.filter(|n| ui_fonts.contains(n)).map(String::from));
+        list.extend(base.iter().cloned());
+        for name in &cjk {
+            if !list.contains(name) {
+                list.push(name.clone());
+            }
+        }
+        list
+    };
+    definitions.families.insert(FontFamily::Proportional, build(Some("ui"), &default_proportional));
+    definitions.families.insert(FontFamily::Monospace, build(None, &default_monospace));
+    definitions.families.insert(widgets::semibold(), build(Some("ui-semibold"), &default_proportional));
+    // One family per CJK font, for text that must keep a single font: a language's own name,
+    // for example, since the fallback chain would take part of it from another font.
+    for name in ["japanese", "korean", "chinese"] {
+        let mut list = vec![name.to_string()];
+        list.extend(build(Some("ui"), &default_proportional).into_iter().filter(|n| n != name));
+        list.retain(|n| definitions.font_data.contains_key(n) || n == name && cjk.contains(&name.to_string()));
+        definitions.families.insert(FontFamily::Name(name.into()), list);
     }
     ctx.set_fonts(definitions);
 }
 
+/// Font family for a language's own name: the CJK languages use their own font throughout.
+fn native_font(language: Language) -> FontFamily {
+    match language {
+        Language::Ja => FontFamily::Name("japanese".into()),
+        Language::Ko => FontFamily::Name("korean".into()),
+        Language::Zh => FontFamily::Name("chinese".into()),
+        _ => FontFamily::Proportional,
+    }
+}
+
 fn apply_style(ctx: &egui::Context, pal: &Palette) {
     ctx.global_style_mut(|style| {
-        for (text_style, size) in [
-            (TextStyle::Body, 12.5),
-            (TextStyle::Button, 12.5),
-            (TextStyle::Monospace, 12.5),
-            (TextStyle::Small, 10.5),
-            (TextStyle::Heading, 17.0),
+        for (text_style, font) in [
+            (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+            (TextStyle::Heading, FontId::new(16.0, widgets::semibold())),
+            (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
         ] {
-            style.text_styles.insert(text_style, FontId::new(size, FontFamily::Monospace));
+            style.text_styles.insert(text_style, font);
         }
         let mut v = if pal.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
         v.panel_fill = pal.bg;
@@ -212,10 +272,13 @@ fn apply_style(ctx: &egui::Context, pal: &Palette) {
         v.extreme_bg_color = pal.bg;
         v.faint_bg_color = pal.panel;
         v.override_text_color = Some(pal.text);
-        v.selection.bg_fill = pal.accent;
-        v.selection.stroke = Stroke::new(1.0, pal.on_accent);
+        v.selection.bg_fill = pal.accent.gamma_multiply(0.45);
+        v.selection.stroke = Stroke::new(1.0, pal.text);
         v.window_stroke = Stroke::new(1.0, pal.line);
+        v.window_corner_radius = CornerRadius::same(10);
+        v.menu_corner_radius = CornerRadius::same(8);
         v.hyperlink_color = pal.accent;
+        let radius = CornerRadius::same(widgets::RADIUS);
         for w in [
             &mut v.widgets.noninteractive,
             &mut v.widgets.inactive,
@@ -223,20 +286,43 @@ fn apply_style(ctx: &egui::Context, pal: &Palette) {
             &mut v.widgets.active,
             &mut v.widgets.open,
         ] {
-            w.corner_radius = CornerRadius::ZERO;
+            w.corner_radius = radius;
         }
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, pal.line);
-        v.widgets.inactive.bg_fill = pal.panel;
-        v.widgets.inactive.weak_bg_fill = pal.bg;
+        v.widgets.inactive.bg_fill = pal.raised;
+        v.widgets.inactive.weak_bg_fill = pal.raised;
         v.widgets.inactive.bg_stroke = Stroke::new(1.0, pal.line);
-        v.widgets.hovered.weak_bg_fill = pal.panel;
-        v.widgets.hovered.bg_stroke = Stroke::new(1.0, pal.dim);
+        v.widgets.hovered.bg_fill = mix(pal.raised, pal.accent, 0.22);
+        v.widgets.hovered.weak_bg_fill = mix(pal.raised, pal.accent, 0.22);
+        v.widgets.hovered.bg_stroke = Stroke::new(1.0, pal.accent);
+        // Scroll handles take these: quiet at rest, accent when grabbed.
+        v.widgets.inactive.fg_stroke.color = pal.dim;
+        v.widgets.hovered.fg_stroke.color = pal.accent;
+        v.widgets.active.fg_stroke.color = pal.accent;
         v.widgets.active.bg_fill = pal.accent;
+        v.widgets.active.weak_bg_fill = pal.accent;
+        v.widgets.open.bg_fill = pal.hover();
+        v.widgets.open.weak_bg_fill = pal.hover();
         style.visuals = v;
-        style.spacing.button_padding = Vec2::new(8.0, 5.0);
-        style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+        style.spacing.button_padding = Vec2::new(10.0, 5.0);
+        style.spacing.item_spacing = Vec2::new(8.0, 6.0);
+        style.spacing.interact_size.y = 28.0;
         style.spacing.slider_width = 140.0;
+        // Scroll bars keep their own strip, so they never sit on top of the content.
+        style.spacing.scroll = egui::style::ScrollStyle {
+            floating_allocated_width: 10.0,
+            foreground_color: true,
+            ..egui::style::ScrollStyle::thin()
+        };
     });
+}
+
+/// Text on top of the camera image, on a dark chip so it stays readable on any frame.
+fn overlay(painter: &egui::Painter, anchor: Pos2, align: Align2, text: String, size: f32, fg: Color32) {
+    let galley = painter.layout_no_wrap(text, FontId::proportional(size), Color32::PLACEHOLDER);
+    let rect = align.anchor_size(anchor, galley.size() + Vec2::new(16.0, 8.0));
+    painter.rect_filled(rect, CornerRadius::same(widgets::RADIUS), Color32::from_black_alpha(150));
+    painter.galley(rect.min + Vec2::new(8.0, 4.0), galley, fg);
 }
 
 fn percent(value: f32) -> String {
@@ -300,7 +386,7 @@ impl App {
         let saved = shared.settings.read().clone();
         let tray = crate::tray::Tray::new(cc, saved.language, shared.clone());
         let language = saved.language;
-        load_cjk_fonts(&cc.egui_ctx, language);
+        load_fonts(&cc.egui_ctx, language);
         let pal = Palette::of(saved.scheme, &saved.custom_colors);
         Self {
             shared,
@@ -308,6 +394,8 @@ impl App {
             model_dir,
             cameras: camera::list(),
             texture: None,
+            mark: load_png(&cc.egui_ctx, "mark", include_bytes!("../assets/icon.png")),
+            size_checked: false,
             links: [
                 ("github", include_bytes!("../assets/github.png").as_slice(), env!("CARGO_PKG_REPOSITORY")),
                 ("x", include_bytes!("../assets/x.png").as_slice(), X_PROFILE),
@@ -335,7 +423,8 @@ impl App {
             hover: None,
             hover_now: None,
             prev_rows: Rows::default(),
-            pulled: None,
+            dwell: (None, Instant::now()),
+            revealed: [false; 3],
             reveal_started: None,
             narrow: false,
             seen_frame: 0,
@@ -389,34 +478,31 @@ impl App {
     fn language_menu(&self, ui: &mut egui::Ui, s: &mut Settings) {
         let pal = self.pal;
         let name = s.language.native_name();
-        let font = FontId::monospace(12.5);
+        let font = FontId::new(12.5, native_font(s.language));
         let text_width = ui.fonts_mut(|f| f.layout_no_wrap(name.to_string(), font.clone(), pal.text).size().x);
         let size = Vec2::new(8.0 + 24.0 + 8.0 + text_width + 8.0 + 12.0 + 8.0, 30.0);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         let painter = ui.painter_at(rect.expand(1.0));
-        if response.hovered() {
-            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.5));
-        }
+        let fill = if response.hovered() { pal.hover() } else { pal.raised };
+        painter.rect_filled(rect, CornerRadius::same(widgets::RADIUS), fill);
         let border = if response.hovered() { pal.dim } else { pal.line };
-        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, border), StrokeKind::Inside);
+        painter.rect_stroke(rect, CornerRadius::same(widgets::RADIUS), Stroke::new(1.0, border), StrokeKind::Inside);
         let flag_rect = Rect::from_min_size(rect.left_center() + Vec2::new(8.0, -8.0), Vec2::new(24.0, 16.0));
         if let Some(flag) = self.flag(s.language) {
             flag.paint_at(ui, flag_rect);
         }
         painter.text(flag_rect.right_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, name, font, pal.text);
-        painter.text(
-            rect.right_center() - Vec2::new(10.0, 0.0),
-            Align2::RIGHT_CENTER,
-            "▾",
-            FontId::monospace(12.0),
-            pal.dim,
-        );
+        let chevron = Rect::from_center_size(rect.right_center() - Vec2::new(14.0, 0.0), Vec2::splat(12.0));
+        icons::paint(&painter, Glyph::ChevronDown, chevron, pal.dim);
         egui::Popup::menu(&response).show(|ui| {
             ui.set_width(190.0);
             for language in Language::ALL {
                 let flag = self.flag(language);
-                if self.menu_row(ui, s.language == language, language.native_name(), flag, None).clicked() {
+                if self
+                    .menu_row(ui, s.language == language, language.native_name(), native_font(language), flag, None)
+                    .clicked()
+                {
                     s.language = language;
                 }
             }
@@ -431,7 +517,17 @@ impl App {
             for scheme in Scheme::ALL {
                 let swatch = Palette::of(scheme, &s.custom_colors);
                 let label = tr(language, scheme.text_key());
-                if self.menu_row(ui, s.scheme == scheme, label, None, Some((swatch.bg, swatch.accent))).clicked() {
+                if self
+                    .menu_row(
+                        ui,
+                        s.scheme == scheme,
+                        label,
+                        FontFamily::Proportional,
+                        None,
+                        Some((swatch.bg, swatch.accent)),
+                    )
+                    .clicked()
+                {
                     s.scheme = scheme;
                 }
             }
@@ -449,7 +545,12 @@ impl App {
                         ui.label(tr(language, key));
                         let swatch = ui.color_edit_button_srgb(color);
                         // Dark colours vanish against the menu without an outline.
-                        ui.painter().rect_stroke(swatch.rect, CornerRadius::ZERO, outline, StrokeKind::Outside);
+                        ui.painter().rect_stroke(
+                            swatch.rect,
+                            CornerRadius::same(widgets::RADIUS),
+                            outline,
+                            StrokeKind::Outside,
+                        );
                         ui.end_row();
                     }
                 });
@@ -464,6 +565,7 @@ impl App {
         ui: &mut egui::Ui,
         selected: bool,
         label: &str,
+        family: FontFamily,
         flag: Option<egui::Image<'static>>,
         swatch: Option<(Color32, Color32)>,
     ) -> egui::Response {
@@ -480,51 +582,32 @@ impl App {
         };
         let painter = ui.painter();
         if let Some(fill) = fill {
-            painter.rect_filled(rect, CornerRadius::ZERO, fill);
+            painter.rect_filled(rect, CornerRadius::same(widgets::RADIUS), fill);
         }
         let icon = Rect::from_min_size(rect.left_center() + Vec2::new(8.0, -8.0), Vec2::new(24.0, 16.0));
         if let Some(flag) = flag {
             flag.paint_at(ui, icon);
         } else if let Some((background, accent)) = swatch {
             let painter = ui.painter();
-            painter.rect_filled(icon, CornerRadius::ZERO, background);
-            painter.rect_filled(Rect::from_min_max(icon.center_top(), icon.right_bottom()), CornerRadius::ZERO, accent);
-            painter.rect_stroke(icon, CornerRadius::ZERO, Stroke::new(1.0, pal.dim), StrokeKind::Inside);
+            painter.rect_filled(icon, CornerRadius::same(widgets::RADIUS), background);
+            painter.rect_filled(
+                Rect::from_min_max(icon.center_top(), icon.right_bottom()),
+                CornerRadius::same(widgets::RADIUS),
+                accent,
+            );
+            painter.rect_stroke(
+                icon,
+                CornerRadius::same(widgets::RADIUS),
+                Stroke::new(1.0, pal.dim),
+                StrokeKind::Inside,
+            );
         }
-        let font = FontId::monospace(13.0);
+        let font = FontId::new(13.0, family);
         ui.painter().text(icon.right_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, label, font, fg);
         response
     }
 
     /// Square button showing an image or a glyph: outlined on hover, filled when `on`.
-    fn icon_button(&self, ui: &mut egui::Ui, icon: Icon<'_>, on: bool) -> egui::Response {
-        let pal = self.pal;
-        let (rect, response) = ui.allocate_exact_size(Vec2::splat(30.0), Sense::click());
-        let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-        let painter = ui.painter_at(rect.expand(1.0));
-        let fg = if on {
-            painter.rect_filled(rect, CornerRadius::ZERO, pal.accent);
-            pal.on_accent
-        } else if response.hovered() {
-            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.5));
-            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.dim), StrokeKind::Inside);
-            pal.text
-        } else {
-            painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, pal.line), StrokeKind::Inside);
-            pal.text.gamma_multiply(0.85)
-        };
-        match icon {
-            Icon::Image(texture) => {
-                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                painter.image(texture, Rect::from_center_size(rect.center(), Vec2::splat(18.0)), uv, fg);
-            }
-            Icon::Glyph(glyph) => {
-                painter.text(rect.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(18.0), fg);
-            }
-        }
-        response
-    }
-
     /// A labelled box that works as a slider: click or drag across it to set `value`
     /// (0..1). The filled part shows the value; 0 reads as `zero_text`.
     fn slider_box(
@@ -536,7 +619,7 @@ impl App {
         width: f32,
     ) -> egui::Response {
         let pal = self.pal;
-        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(width, 24.0), Sense::click_and_drag());
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(width, 32.0), Sense::click_and_drag());
         response = response.on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
         if (response.dragged() || response.clicked())
             && let Some(pointer) = response.interact_pointer_pos()
@@ -551,31 +634,45 @@ impl App {
         }
         let painter = ui.painter_at(rect);
         let fill = Rect::from_min_size(rect.min, Vec2::new(rect.width() * *value, rect.height()));
-        painter.rect_filled(fill, CornerRadius::ZERO, pal.accent.gamma_multiply(0.35));
-        let border = if response.hovered() || response.dragged() { pal.dim } else { pal.line };
-        painter.rect_stroke(rect, CornerRadius::ZERO, Stroke::new(1.0, border), StrokeKind::Inside);
-        let font = FontId::monospace(12.0);
-        painter.text(rect.left_center() + Vec2::new(8.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), pal.text);
-        let shown = if *value > 0.0 { percent(*value) } else { zero_text.to_string() };
-        painter.text(rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, shown, font, pal.text);
+        painter.rect_filled(fill, CornerRadius::same(widgets::RADIUS), pal.accent.gamma_multiply(0.35));
+        let hot = response.hovered() || response.dragged();
+        if hot {
+            painter.rect_filled(rect, CornerRadius::same(widgets::RADIUS), pal.accent.gamma_multiply(0.08));
+        }
+        if *value > 0.0 {
+            let x = (rect.left() + rect.width() * *value).clamp(rect.left() + 2.0, rect.right() - 2.0);
+            painter.vline(x, rect.top() + 6.0..=rect.bottom() - 6.0, Stroke::new(2.0, pal.accent));
+        }
+        let border = if hot { pal.dim } else { pal.line };
+        painter.rect_stroke(rect, CornerRadius::same(widgets::RADIUS), Stroke::new(1.0, border), StrokeKind::Inside);
+        let on = *value > 0.0;
+        let icon = Rect::from_center_size(rect.left_center() + Vec2::new(16.0, 0.0), Vec2::splat(15.0));
+        icons::paint(&painter, Glyph::Smooth, icon, if on { pal.accent } else { pal.dim });
+        let font = FontId::new(13.0, FontFamily::Proportional);
+        painter.text(rect.left_center() + Vec2::new(32.0, 0.0), Align2::LEFT_CENTER, label, font.clone(), pal.text);
+        let shown = if on { percent(*value) } else { zero_text.to_string() };
+        let color = if on { pal.text } else { pal.dim };
+        painter.text(rect.right_center() - Vec2::new(10.0, 0.0), Align2::RIGHT_CENTER, shown, font, color);
         response
     }
 
     /// Small pill switch used in panel headers and settings.
     fn switch(&self, ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
-        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(26.0, 14.0), Sense::click());
+        let pal = self.pal;
+        let (rect, mut response) = ui.allocate_exact_size(Vec2::new(32.0, 18.0), Sense::click());
+        response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
         if response.clicked() {
             *on = !*on;
             response.mark_changed();
         }
+        let t = ui.ctx().animate_bool_responsive(response.id, *on);
         let painter = ui.painter_at(rect.expand(1.0));
-        let fill = if *on { self.pal.accent } else { self.pal.line };
-        painter.rect_filled(rect, CornerRadius::same(7), fill);
-        let knob_x = if *on { rect.right() - 7.0 } else { rect.left() + 7.0 };
+        let track = if response.hovered() { mix(pal.line, pal.dim, 0.3) } else { pal.line };
+        painter.rect_filled(rect, CornerRadius::same(9), mix(track, pal.accent, t));
         painter.circle_filled(
-            Pos2::new(knob_x, rect.center().y),
-            4.5,
-            if *on { self.pal.on_accent } else { self.pal.bg },
+            Pos2::new(rect.left() + 9.0 + t * 14.0, rect.center().y),
+            6.5,
+            mix(pal.dim, pal.on_accent, t),
         );
         response
     }
@@ -591,7 +688,11 @@ impl App {
     }
 
     fn panel_frame(&self) -> Frame {
-        Frame::new().fill(self.pal.bg).inner_margin(Margin::same(8))
+        Frame::new()
+            .fill(self.pal.panel)
+            .stroke(Stroke::new(1.0, self.pal.line.gamma_multiply(0.8)))
+            .corner_radius(CornerRadius::same(widgets::RADIUS + 4))
+            .inner_margin(Margin::symmetric(8, 10))
     }
 
     /// Uploads a new preview image; returns whether there was one.
@@ -631,71 +732,390 @@ impl App {
         }
     }
 
-    fn top_bar(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+    /// The window has no system frame, so its edges and corners resize it here. The minimum
+    /// size is enforced by the system while dragging; a size restored from an older run
+    /// (or from a smaller minimum) is raised once at the start.
+    fn window_edges(&mut self, ctx: &egui::Context) {
+        let inner = ctx.input(|i| i.viewport().inner_rect);
+        if !self.size_checked
+            && let Some(inner) = inner
+        {
+            self.size_checked = true;
+            if inner.width() < MIN_WINDOW.x || inner.height() < MIN_WINDOW.y {
+                let size = inner.size().max(MIN_WINDOW);
+                ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
+            }
+        }
+        resize_edges(ctx);
+    }
+
+    /// Color and words of the status pill: the one place that says whether tracking works.
+    fn status_line(&self, s: &Settings, snapshot: &Snapshot) -> (Color32, String) {
+        status_line(&self.pal, s.language, s.ft_output, &snapshot.status, snapshot.tracking_fps)
+    }
+
+    fn top_bar(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+        let pal = self.pal;
+        // The window has no system title bar: the empty part of this bar drags it, a double
+        // click maximizes it. Registered first so the controls drawn over it win the pointer.
+        let drag = ui.interact(ui.max_rect(), ui.make_persistent_id("title_drag"), Sense::click_and_drag());
+        let ctx = ui.ctx().clone();
+        let inside = ctx.pointer_hover_pos().is_some_and(|p| ctx.content_rect().shrink(RESIZE_BAND * 2.0).contains(p));
+        if drag.drag_started_by(egui::PointerButton::Primary) && inside {
+            ui.send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
+        let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
+        if drag.double_clicked() {
+            ui.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+        }
         ui.horizontal(|ui| {
-            let power = if s.ft_output { "● FT" } else { "○ FT" };
-            let hint = self.t(s, "ft_hint");
-            self.toggle(ui, &mut s.ft_output, power).on_hover_text(hint);
-            ui.add_space(8.0);
-            ui.label(RichText::new("VRC OPENFACE").heading().strong());
-            ui.add_space(10.0);
-            for (texture, url) in &self.links {
-                if self.icon_button(ui, Icon::Image(texture.id()), false).on_hover_text(*url).clicked() {
-                    crate::system::open_url(url);
-                }
+            if let Some(mark) = &self.mark {
+                ui.add(egui::Image::new((mark.id(), Vec2::splat(26.0))));
+            }
+            // A window saved narrower than the minimum still has to fit its bar: icons only.
+            let tight = ui.available_width() < 940.0;
+            if !tight {
+                ui.label(RichText::new("VRC Openface").font(FontId::new(16.0, widgets::semibold())));
+                ui.add_space(12.0);
+            }
+            let (color, text) = self.status_line(s, snapshot);
+            // Sized for the longest text it shows, so the controls after it stay put.
+            let longest = format!("{} · 99 FPS", self.t(s, "tracking"));
+            widgets::pill(ui, &pal, color, &text, &longest);
+            let (look, glyph, label) = if s.ft_output {
+                (Look::Secondary, Glyph::Pause, self.t(s, "tray_pause"))
+            } else {
+                (Look::Primary, Glyph::Play, self.t(s, "resume"))
+            };
+            let pause = if tight {
+                widgets::icon_button(ui, &pal, Icon::Draw(glyph), !s.ft_output)
+            } else {
+                let other = if s.ft_output { self.t(s, "resume") } else { self.t(s, "tray_pause") };
+                widgets::button(ui, &pal, Button::new(label).glyph(glyph).look(look).reserve(other))
+            };
+            if pause.on_hover_text(self.t(s, "ft_hint")).clicked() {
+                s.ft_output = !s.ft_output;
+            }
+            ui.add_space(4.0);
+            let labels = [self.t(s, "view_simple"), self.t(s, "view_advanced")];
+            let mut view = usize::from(s.advanced);
+            if widgets::segmented(ui, &pal, &labels, &mut view) {
+                s.advanced = view == 1;
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                self.language_menu(ui, s);
+                if widgets::window_button(ui, &pal, Glyph::Close, true).clicked() {
+                    ui.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                let (glyph, target) = if maximized { (Glyph::Restore, false) } else { (Glyph::Maximize, true) };
+                if widgets::window_button(ui, &pal, glyph, false).clicked() {
+                    ui.send_viewport_cmd(egui::ViewportCommand::Maximized(target));
+                }
+                if widgets::window_button(ui, &pal, Glyph::Minimize, false).clicked() {
+                    ui.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
                 ui.add_space(8.0);
-                let theme = self.icon_button(ui, Icon::Glyph("🎨"), false).on_hover_text(self.t(s, "color_scheme"));
-                self.theme_menu(&theme, s);
-                if self
-                    .icon_button(ui, Icon::Glyph("⚙"), self.settings_open)
-                    .on_hover_text(self.t(s, "settings"))
-                    .clicked()
-                {
+                let gear = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Gear), self.settings_open);
+                if gear.on_hover_text(self.t(s, "settings")).clicked() {
                     self.settings_open = !self.settings_open;
                 }
-                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).color(self.pal.dim));
+                let theme = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Swatch), false)
+                    .on_hover_text(self.t(s, "color_scheme"));
+                self.theme_menu(&theme, s);
+                self.language_menu(ui, s);
+                if !tight {
+                    ui.add_space(4.0);
+                    for (texture, url) in self.links.iter().rev() {
+                        if widgets::icon_button(ui, &pal, Icon::Image(texture.id()), false)
+                            .on_hover_text(*url)
+                            .clicked()
+                        {
+                            crate::system::open_url(url);
+                        }
+                    }
+                }
             });
         });
     }
 
-    fn preview(&mut self, ui: &mut egui::Ui, s: &Settings, snapshot: &Snapshot) {
+    /// Camera and calibration: what you do first, and what you come back to.
+    fn sidebar(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+        egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(ui, |ui| {
+            ui.spacing_mut().item_spacing.y = 12.0;
+            self.camera_card(ui, s, snapshot, false);
+            self.calibration_card(ui, s, snapshot);
+        });
+    }
+
+    fn camera_card(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot, large: bool) {
         let pal = self.pal;
-        // Short or narrow areas give more of their height to the parameter lists.
-        let share = if ui.available_height() < 700.0 || ui.available_width() < 900.0 { 0.30 } else { 0.42 };
-        let height = (ui.available_height() * share).clamp(120.0, 430.0);
-        let (outer, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), height), Sense::hover());
-        let painter = ui.painter_at(outer);
-        painter.rect_filled(outer, CornerRadius::ZERO, pal.bg);
+        widgets::card(&pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.label(widgets::title(&pal, self.t(s, "camera")));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let refresh = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Refresh), false);
+                    if refresh.on_hover_text(self.t(s, "refresh_cameras")).clicked() {
+                        self.cameras = camera::list();
+                    }
+                    let mirror = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Mirror), s.mirror);
+                    if mirror.on_hover_text(self.t(s, "mirror")).clicked() {
+                        s.mirror = !s.mirror;
+                    }
+                });
+            });
+            let selected = self
+                .cameras
+                .iter()
+                .find(|c| c.index == s.camera_index)
+                .map(|c| format!("{}: {}", c.index, c.name))
+                .unwrap_or_else(|| format!("{}: {}", s.camera_index, self.t(s, "camera")));
+            egui::ComboBox::from_id_salt("camera")
+                .width(ui.available_width())
+                .selected_text(selected)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    for camera in &self.cameras {
+                        ui.selectable_value(
+                            &mut s.camera_index,
+                            camera.index,
+                            format!("{}: {}", camera.index, camera.name),
+                        );
+                    }
+                });
+            // Resolution and rate, so they do not need a trip to the settings.
+            ui.horizontal(|ui| {
+                let gap = ui.spacing().item_spacing.x;
+                let half = ((ui.available_width() - gap) / 2.0).max(80.0);
+                let current = format!("{}\u{00d7}{}", s.resolution.0, s.resolution.1);
+                let resolution = egui::ComboBox::from_id_salt("quick-resolution")
+                    .width(half)
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        for r in RESOLUTIONS {
+                            ui.selectable_value(&mut s.resolution, r, format!("{}\u{00d7}{}", r.0, r.1));
+                        }
+                    });
+                resolution.response.on_hover_text(self.t(s, "resolution"));
+                let fps = egui::ComboBox::from_id_salt("quick-fps")
+                    .width(half)
+                    .selected_text(format!("{} FPS", s.camera_fps))
+                    .show_ui(ui, |ui| {
+                        for rate in [30, 60] {
+                            ui.selectable_value(&mut s.camera_fps, rate, format!("{rate} FPS"));
+                        }
+                    });
+                fps.response.on_hover_text(self.t(s, "camera_fps"));
+            });
+            // The large preview takes the height the window leaves, minus the chips below it.
+            let tallest = if large { (ui.available_height() - 48.0).max(200.0) } else { 280.0 };
+            self.preview(ui, s, snapshot, tallest);
+            ui.horizontal_wrapped(|ui| {
+                let (preview, landmarks) = (self.t(s, "camera_preview"), self.t(s, "face_landmarks"));
+                widgets::chip(ui, &pal, Glyph::Eye, preview, &mut s.show_camera);
+                widgets::chip(ui, &pal, Glyph::Face, landmarks, &mut s.show_landmarks);
+                let ears = format!("{}\n{}", self.t(s, "cat_ears"), self.t(s, "cat_ears_hint"));
+                widgets::chip(ui, &pal, Glyph::Ears, self.t(s, "cat_ears"), &mut s.cat_ears).on_hover_text(ears);
+            });
+        });
+    }
 
-        let (fw, fh) = snapshot.frame_size;
-        let aspect = if fw > 0 && fh > 0 { fw as f32 / fh as f32 } else { 16.0 / 9.0 };
-        let image_w = (outer.height() * aspect).min(outer.width());
-        let image = Rect::from_center_size(outer.center(), Vec2::new(image_w, image_w / aspect));
+    fn calibration_card(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+        let pal = self.pal;
+        // A step shows a check once this avatar has it saved.
+        let (neutral_done, gaze_done) = {
+            let store = self.shared.calibrations.lock();
+            snapshot.avatar_id.as_ref().and_then(|id| store.avatars.get(id)).map_or((false, false), |c| {
+                (c.channels.values().any(|channel| !channel.is_default()), c.gaze_center.is_some())
+            })
+        };
+        widgets::card(&pal).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(widgets::title(&pal, self.t(s, "calibrate")));
+            ui.add_space(2.0);
+            self.calibration_step(
+                ui,
+                s,
+                (Glyph::Scan, "capture_neutral", "step_neutral", "neutral_hint"),
+                (neutral_done, Command::CaptureNeutral, Command::UndoNeutral, "neutral_undo"),
+            );
+            ui.add_space(4.0);
+            self.calibration_step(
+                ui,
+                s,
+                (Glyph::Target, "center_gaze", "step_gaze", "center_gaze_hint"),
+                (gaze_done, Command::CenterGaze, Command::ResetGaze, "reset_gaze"),
+            );
+        });
+    }
 
-        let hatch = Stroke::new(1.0, pal.line.gamma_multiply(0.6));
-        for side in [
-            Rect::from_min_max(outer.min, Pos2::new(image.left(), outer.bottom())),
-            Rect::from_min_max(Pos2::new(image.right(), outer.top()), outer.max),
-        ] {
-            if side.width() < 1.0 {
-                continue;
+    /// One calibration step: the action, a line saying how, and the undo next to it.
+    fn calibration_step(
+        &self,
+        ui: &mut egui::Ui,
+        s: &Settings,
+        text: (Glyph, &str, &str, &str),
+        action: (bool, Command, Command, &str),
+    ) {
+        let pal = self.pal;
+        let (glyph, label, caption, hint) = text;
+        let (done, run, undo, undo_hint) = action;
+        ui.horizontal(|ui| {
+            let width = ui.available_width() - 32.0 - ui.spacing().item_spacing.x;
+            let step = Button::new(self.t(s, label)).glyph(glyph).width(width).done(done);
+            if widgets::button(ui, &pal, step).on_hover_text(self.t(s, hint)).clicked() {
+                let _ = self.commands.send(run);
             }
-            let side_painter = painter.with_clip_rect(side);
-            let mut x = side.left() - side.height();
-            while x < side.right() {
-                side_painter
-                    .line_segment([Pos2::new(x, side.bottom()), Pos2::new(x + side.height(), side.top())], hatch);
-                x += 9.0;
+            let revert = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Undo), false);
+            if revert.on_hover_text(self.t(s, undo_hint)).clicked() {
+                let _ = self.commands.send(undo);
+            }
+        });
+        ui.label(RichText::new(self.t(s, caption)).small().color(pal.dim));
+    }
+
+    /// Search and the switches that apply to all three tables: one row, or two when narrow.
+    fn tools_row(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+        // Two groups that stay whole: one row when both fit, otherwise one row each.
+        let stacked = ui.available_width() < 900.0;
+        ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
+        if stacked {
+            ui.horizontal(|ui| self.tools_filters(ui, s));
+            ui.horizontal(|ui| self.tools_options(ui, s, snapshot));
+        } else {
+            ui.horizontal(|ui| {
+                self.tools_filters(ui, s);
+                ui.add_space(6.0);
+                let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, 20.0), Sense::hover());
+                ui.painter().rect_filled(rect, 0, self.pal.line);
+                ui.add_space(6.0);
+                self.tools_options(ui, s, snapshot);
+            });
+        }
+    }
+
+    /// Search field: the whole box is the click target, it lights up while typing.
+    fn search_field(&mut self, ui: &mut egui::Ui, s: &Settings) {
+        let pal = self.pal;
+        let hint = self.t(s, "search");
+        let id = ui.make_persistent_id("search_field");
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(260.0, 32.0), Sense::click());
+        let focused = ui.memory(|m| m.has_focus(id));
+        if response.clicked() {
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+        let hot = response.hovered() || focused;
+        let painter = ui.painter_at(rect.expand(3.0));
+        let radius = CornerRadius::same(widgets::RADIUS);
+        let fill = if focused {
+            pal.bg
+        } else if hot {
+            pal.hover()
+        } else {
+            pal.raised
+        };
+        let stroke =
+            if focused { Stroke::new(1.5, pal.accent) } else { Stroke::new(1.0, if hot { pal.dim } else { pal.line }) };
+        painter.rect(rect, radius, fill, stroke, StrokeKind::Inside);
+        let icon = Rect::from_center_size(rect.left_center() + Vec2::new(17.0, 0.0), Vec2::splat(15.0));
+        icons::paint(&painter, Glyph::Search, icon, if focused { pal.accent } else { pal.dim });
+        let inner = Rect::from_min_max(rect.min + Vec2::new(34.0, 0.0), rect.max - Vec2::new(32.0, 0.0));
+        let mut field =
+            ui.new_child(egui::UiBuilder::new().max_rect(inner).layout(Layout::left_to_right(Align::Center)));
+        field.add(
+            egui::TextEdit::singleline(&mut self.search)
+                .id(id)
+                .hint_text(hint)
+                .frame(Frame::NONE)
+                .margin(Margin::ZERO)
+                .align(Align2::LEFT_CENTER)
+                .min_size(Vec2::new(inner.width(), 32.0))
+                .desired_width(inner.width()),
+        );
+        if !self.search.is_empty() {
+            let close = Rect::from_center_size(rect.right_center() - Vec2::new(17.0, 0.0), Vec2::splat(22.0));
+            let clear = ui.interact(close, id.with("clear"), Sense::click());
+            if clear.hovered() {
+                painter.circle_filled(close.center(), 10.0, pal.line);
+            }
+            let color = if clear.hovered() { pal.text } else { pal.dim };
+            icons::paint(&painter, Glyph::Close, close.shrink(5.0), color);
+            if clear.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                self.search.clear();
             }
         }
+    }
+
+    /// Search and the switches that choose which rows the tables show.
+    fn tools_filters(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        let pal = self.pal;
+        self.search_field(ui, s);
+        let (unused, tongue) = (self.t(s, "unused"), self.t(s, "tongue"));
+        widgets::switch_toggle(ui, &pal, &mut s.show_unused, unused);
+        widgets::switch_toggle(ui, &pal, &mut s.tongue, tongue);
+    }
+
+    /// How the values are processed, and the reset for the rows.
+    fn tools_options(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+        let pal = self.pal;
+        let avatar = snapshot.avatar_id.clone().unwrap_or_default();
+        let hint = self.t(s, "symmetric_hint");
+        let label = self.t(s, "symmetric_face");
+        widgets::chip_sized(ui, &pal, Glyph::Symmetry, label, &mut s.processing.symmetric_face, 32.0)
+            .on_hover_text(hint);
+        let (name, off) = (self.t(s, "smoothing"), self.t(s, "smoothing_off"));
+        let hint = self.t(s, "smoothing_hint");
+        self.slider_box(ui, &mut s.processing.smoothing, name, off, 190.0).on_hover_text(hint);
+        let reset = widgets::button(ui, &pal, Button::new(self.t(s, "reset")).glyph(Glyph::Undo).look(Look::Quiet));
+        if reset.on_hover_text(self.t(s, "reset_rows")).clicked() {
+            s.processing = processing::ProcessingSettings::default();
+            if let Some(c) = self.shared.calibrations.lock().avatars.get_mut(&avatar) {
+                c.channels.clear();
+                c.unlinked.clear();
+            }
+            self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The first view: the camera as large as the window allows next to the calibration.
+    fn simple_view(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot, compact: bool) {
+        if compact {
+            egui::ScrollArea::vertical().id_salt("simple").auto_shrink([false, false]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 12.0;
+                self.camera_card(ui, s, snapshot, false);
+                self.calibration_card(ui, s, snapshot);
+            });
+            return;
+        }
+        let gap = 16.0;
+        let height = ui.available_height();
+        let main = ui.available_width() - SIDEBAR_WIDTH - gap;
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            let column = Layout::top_down(Align::Min);
+            ui.allocate_ui_with_layout(Vec2::new(main, height), column, |ui| self.camera_card(ui, s, snapshot, true));
+            ui.allocate_ui_with_layout(Vec2::new(SIDEBAR_WIDTH, height), column, |ui| {
+                self.calibration_card(ui, s, snapshot);
+            });
+        });
+    }
+
+    fn preview(&mut self, ui: &mut egui::Ui, s: &Settings, snapshot: &Snapshot, tallest: f32) {
+        let pal = self.pal;
+        let (fw, fh) = snapshot.frame_size;
+        let aspect = if fw > 0 && fh > 0 { fw as f32 / fh as f32 } else { 16.0 / 9.0 };
+        let width = ui.available_width();
+        let height = (width / aspect).min(tallest);
+        let (outer, response) = ui.allocate_exact_size(Vec2::new(width, height), Sense::hover());
+        let painter = ui.painter_at(outer.expand(2.0));
+        let radius = CornerRadius::same(widgets::RADIUS);
+        painter.rect_filled(outer, radius, if pal.dark { Color32::from_gray(5) } else { Color32::from_gray(226) });
+        let image_w = (height * aspect).min(width);
+        let image = Rect::from_center_size(outer.center(), Vec2::new(image_w, image_w / aspect));
 
         if s.show_camera
             && let Some(texture) = &self.texture
         {
-            painter.image(texture.id(), image, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            egui::Image::new((texture.id(), image.size())).corner_radius(radius).paint_at(ui, image);
         }
         let to_screen =
             |p: &[f32; 3]| Pos2::new(image.left() + p[0] * image.width(), image.top() + p[1] * image.height());
@@ -708,7 +1128,7 @@ impl App {
         if s.cat_ears && snapshot.landmarks.len() > 400 {
             self.draw_ears(&painter, snapshot, &to_screen);
         }
-        painter.rect_stroke(outer, CornerRadius::ZERO, Stroke::new(1.0, pal.line), StrokeKind::Inside);
+        painter.rect_stroke(outer, radius, Stroke::new(1.0, pal.line), StrokeKind::Inside);
         self.reveal_on_hover(ui, &painter, &response, s, image);
 
         let status = match &snapshot.status {
@@ -719,13 +1139,7 @@ impl App {
             Status::ModelError(e) => Some(format!("{}: {e}", self.t(s, "model_error"))),
         };
         if let Some(status) = status {
-            painter.text(
-                outer.left_top() + Vec2::new(14.0, 12.0),
-                Align2::LEFT_TOP,
-                status,
-                FontId::monospace(12.0),
-                pal.text,
-            );
+            overlay(&painter, outer.left_top() + Vec2::new(8.0, 8.0), Align2::LEFT_TOP, status, 12.0, Color32::WHITE);
         }
         let banner = if let Some(progress) = snapshot.capture_progress {
             Some(format!("{} {:.0}%", self.t(s, "hold_still"), progress * 100.0))
@@ -736,27 +1150,29 @@ impl App {
                 .map(|(key, _)| self.t(s, key).to_string())
         };
         if let Some(text) = banner {
-            painter.text(
-                outer.center_top() + Vec2::new(0.0, 12.0),
-                Align2::CENTER_TOP,
+            overlay(
+                &painter,
+                outer.center_bottom() - Vec2::new(0.0, 34.0),
+                Align2::CENTER_BOTTOM,
                 text,
-                FontId::monospace(13.0),
-                pal.text,
+                13.0,
+                Color32::WHITE,
             );
         }
         let fps = format!(
-            "{} {:.0} FPS  |  {} {:.0} FPS",
+            "{} {:.0} · {} {:.0} FPS",
             self.t(s, "tracking"),
             snapshot.tracking_fps,
             self.t(s, "camera"),
             snapshot.camera_fps
         );
-        painter.text(
-            outer.left_bottom() + Vec2::new(14.0, -12.0),
+        overlay(
+            &painter,
+            outer.left_bottom() + Vec2::new(8.0, -8.0),
             Align2::LEFT_BOTTOM,
             fps,
-            FontId::monospace(11.5),
-            pal.dim,
+            11.0,
+            Color32::from_white_alpha(200),
         );
     }
 
@@ -826,70 +1242,6 @@ impl App {
         }
     }
 
-    fn toolbar(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
-        // Wraps onto a second line in narrow windows instead of cutting buttons off.
-        ui.horizontal_wrapped(|ui| {
-            let selected = self
-                .cameras
-                .iter()
-                .find(|c| c.index == s.camera_index)
-                .map(|c| format!("{}: {}", c.index, c.name))
-                .unwrap_or_else(|| format!("{}: {}", s.camera_index, self.t(s, "camera")));
-            egui::ComboBox::from_id_salt("camera")
-                .width(190.0)
-                .selected_text(format!("📷 {selected}"))
-                .truncate()
-                .show_ui(ui, |ui| {
-                    for camera in &self.cameras {
-                        ui.selectable_value(
-                            &mut s.camera_index,
-                            camera.index,
-                            format!("{}: {}", camera.index, camera.name),
-                        );
-                    }
-                });
-            if ui.button("⟳").on_hover_text(self.t(s, "refresh_cameras")).clicked() {
-                self.cameras = camera::list();
-            }
-            let hint = self.t(s, "mirror");
-            self.toggle(ui, &mut s.mirror, "⇆").on_hover_text(hint);
-            ui.add_space(6.0);
-            let (preview, landmarks) = (self.t(s, "camera_preview"), self.t(s, "face_landmarks"));
-            let ears = format!("{}\n{}", self.t(s, "cat_ears"), self.t(s, "cat_ears_hint"));
-            self.toggle(ui, &mut s.show_camera, &format!("🎥 {preview}"));
-            self.toggle(ui, &mut s.show_landmarks, &format!("☺ {landmarks}"));
-            self.toggle(ui, &mut s.cat_ears, "🐱").on_hover_text(ears);
-            ui.add_space(6.0);
-            if ui
-                .button(format!("☺ {}", self.t(s, "capture_neutral")))
-                .on_hover_text(self.t(s, "neutral_hint"))
-                .clicked()
-            {
-                let _ = self.commands.send(Command::CaptureNeutral);
-            }
-            if ui.button("↺").on_hover_text(self.t(s, "neutral_undo")).clicked() {
-                let _ = self.commands.send(Command::UndoNeutral);
-            }
-            if ui
-                .button(format!("◎ {}", self.t(s, "center_gaze")))
-                .on_hover_text(self.t(s, "center_gaze_hint"))
-                .clicked()
-            {
-                let _ = self.commands.send(Command::CenterGaze);
-            }
-            if ui.button("↺").on_hover_text(self.t(s, "reset_gaze")).clicked() {
-                let _ = self.commands.send(Command::ResetGaze);
-            }
-            let hint = self.t(s, "search");
-            let search = egui::TextEdit::singleline(&mut self.search).hint_text(hint).desired_width(200.0);
-            if ui.available_width() >= 210.0 {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| ui.add(search));
-            } else {
-                ui.add(search);
-            }
-        });
-    }
-
     fn avatar_known(snapshot: &Snapshot) -> bool {
         !snapshot.avatar_ft_params.is_empty()
     }
@@ -905,56 +1257,6 @@ impl App {
             }
         }
         used
-    }
-
-    /// Order of the Unified Expressions list. When the hovered channel feeds expressions
-    /// that are not all in view, they are taken out and put back as one block lined up
-    /// with the channel's row. The decision is kept while the
-    /// channel stays hovered, otherwise the moved rows would count as visible next frame.
-    /// Returns the order and the positions of the block in it.
-    fn pull_related(&mut self, shown: &[usize], content_top: f32) -> (Vec<usize>, std::ops::Range<usize>) {
-        let Some(Hover::Channel(c)) = self.hover_now else {
-            self.pulled = None;
-            return (shown.to_vec(), 0..0);
-        };
-        let feeds = |o: &usize| self.mapper.dependencies(*o).contains(&c);
-        let related: Vec<usize> = shown.iter().copied().filter(feeds).collect();
-        let rest: Vec<usize> = shown.iter().copied().filter(|o| !feeds(o)).collect();
-        let at = match self.pulled {
-            Some((pulled, at)) if pulled == c => at,
-            _ => {
-                let view = self.prev_rows.view[1];
-                let in_view = related.iter().all(|o| {
-                    self.prev_rows
-                        .outputs
-                        .iter()
-                        .any(|(i, r)| i == o && r.top() >= view.top() - 0.5 && r.bottom() <= view.bottom() + 0.5)
-                });
-                let y = self.rows.channels.iter().find(|(i, _)| *i == c).map(|(_, r)| r.center().y);
-                let at = match y {
-                    Some(y) if !in_view && !related.is_empty() => {
-                        let n = related.len() as f32;
-                        let index = (y - content_top) / ROW_HEIGHT - n / 2.0;
-                        // Keep the whole block inside the visible part of the list.
-                        let first = ((view.top() - content_top) / ROW_HEIGHT).ceil();
-                        let last = ((view.bottom() - content_top) / ROW_HEIGHT).floor() - n;
-                        Some(index.round().min(last).max(first).max(0.0) as usize)
-                    }
-                    _ => None,
-                };
-                self.pulled = Some((c, at));
-                at
-            }
-        };
-        match at {
-            Some(at) => {
-                let at = at.min(rest.len());
-                let mut order = rest;
-                order.splice(at..at, related.iter().copied());
-                (order, at..at + related.len())
-            }
-            None => (shown.to_vec(), 0..0),
-        }
     }
 
     fn channel_label(&self, s: &Settings, index: usize) -> String {
@@ -977,35 +1279,45 @@ impl App {
         let (rect, response) = ui.allocate_exact_size(Vec2::new(width, ROW_HEIGHT), Sense::click());
         let painter = ui.painter_at(rect);
         if response.hovered() || highlight {
-            painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.45));
+            painter.rect_filled(row_inset(rect), CornerRadius::same(5), pal.line.gamma_multiply(0.5));
         }
+        let value = snapshot.values[index];
+        paint_meter(&painter, rect, &pal, value, false, used);
         let color = if used { pal.text } else { pal.dim };
         // Room for the value on the right and the markers after the name.
         let galley =
-            truncated(&painter, self.channel_label(s, index), FontId::monospace(12.5), color, rect.width() - 90.0);
-        let text_pos = rect.left_center() + Vec2::new(10.0, -galley.size().y / 2.0);
+            truncated(&painter, self.channel_label(s, index), FontId::proportional(13.0), color, rect.width() - 96.0);
+        let text_pos = rect.left_center() + Vec2::new(12.0, -galley.size().y / 2.0);
         let text_right = text_pos.x + galley.size().x;
         painter.galley(text_pos, galley, color);
-        let mut x = text_right + 7.0;
+        let mut x = text_right + 9.0;
         painter.circle_filled(Pos2::new(x, rect.center().y), 2.2, if used { pal.accent } else { pal.line });
         let calibration = self.shared.calibrations.lock().avatars.get(avatar).map(|c| c.get(index)).unwrap_or_default();
         if !calibration.is_default() {
-            x += 9.0;
-            painter.text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, "◆", FontId::monospace(8.0), pal.accent);
+            // Calibrated for this avatar: a small diamond.
+            x += 11.0;
+            let c = Pos2::new(x, rect.center().y);
+            let points = vec![
+                c + Vec2::new(0.0, -3.6),
+                c + Vec2::new(3.6, 0.0),
+                c + Vec2::new(0.0, 3.6),
+                c + Vec2::new(-3.6, 0.0),
+            ];
+            painter.add(Shape::convex_polygon(points, pal.accent, Stroke::NONE));
         }
         if s.processing.source(index) == Source::Mesh {
-            x += 11.0;
-            painter.text(Pos2::new(x, rect.center().y), Align2::LEFT_CENTER, "▦", FontId::monospace(10.0), pal.dim);
+            // Taken from the face mesh instead of the model: a small outlined square.
+            x += 12.0;
+            let mark = Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::splat(7.0));
+            painter.rect_stroke(mark, CornerRadius::same(2), Stroke::new(1.0, pal.dim), StrokeKind::Inside);
         }
-        let value = snapshot.values[index];
         painter.text(
-            rect.right_center() - Vec2::new(10.0, 0.0),
+            rect.right_center() - Vec2::new(12.0, 0.0),
             Align2::RIGHT_CENTER,
             percent(value),
-            FontId::monospace(11.5),
-            pal.dim,
+            FontId::proportional(12.5),
+            if used { pal.text } else { pal.dim },
         );
-        row_separator(&painter, rect, &pal);
         response.on_hover_text(format!(
             "{} · {} {}",
             channels::name(index),
@@ -1134,33 +1446,14 @@ impl App {
             let (dim, title) = (self.pal.dim, self.t(s, "mediapipe"));
             let title = |ui: &mut egui::Ui| {
                 ui.label(RichText::new(format!("{active}/{}", total - active)).color(dim));
-                ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
+                ui.add(egui::Label::new(RichText::new(title).font(FontId::new(13.5, widgets::semibold()))).truncate());
             };
-            let controls = |ui: &mut egui::Ui| {
-                self.switch(ui, &mut s.show_unused);
-                ui.label(self.t(s, "unused"));
-                self.switch(ui, &mut s.tongue);
-                ui.label(self.t(s, "tongue"));
-                if ui.button(self.t(s, "reset")).on_hover_text(self.t(s, "reset_rows")).clicked() {
-                    s.processing = processing::ProcessingSettings::default();
-                    if let Some(c) = self.shared.calibrations.lock().avatars.get_mut(&avatar) {
-                        c.channels.clear();
-                        c.unlinked.clear();
-                    }
-                    self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
-                }
-                let hint = self.t(s, "symmetric_hint");
-                let label = self.t(s, "symmetric_face");
-                self.toggle(ui, &mut s.processing.symmetric_face, label).on_hover_text(hint);
-                let (name, off) = (self.t(s, "smoothing"), self.t(s, "smoothing_off"));
-                let hint = self.t(s, "smoothing_hint");
-                self.slider_box(ui, &mut s.processing.smoothing, name, off, 150.0).on_hover_text(hint);
-            };
-            header(ui, "mediapipe", title, controls);
+            header(ui, "mediapipe", title, |_: &mut egui::Ui| {});
             if s.tongue {
                 match &snapshot.tongue {
                     TongueStatus::Missing => {
-                        ui.horizontal(|ui| {
+                        // Wraps: a row wider than the panel would push the panels beside it off screen.
+                        ui.horizontal_wrapped(|ui| {
                             ui.label(RichText::new(self.t(s, "tongue_missing")).color(self.pal.dim).small());
                             if ui.small_button(self.t(s, "import_tongue")).clicked() {
                                 self.import_tongue();
@@ -1198,7 +1491,6 @@ impl App {
                     if rows.is_empty() {
                         continue;
                     }
-                    let group_top = ui.cursor().top();
                     for (l, r) in rows {
                         let lines: Vec<Vec<(usize, f32)>> = match r {
                             Some(r) if single => vec![vec![(l, full)], vec![(r, full)]],
@@ -1215,6 +1507,7 @@ impl App {
                                         let cell =
                                             self.channel_cell(ui, s, snapshot, i, used[i], width, &avatar, highlight);
                                         self.rows.channels.push((i, cell.rect));
+                                        self.reveal(ui, 0, i, cell.rect);
                                         if cell.hovered() {
                                             self.hover_now = Some(Hover::Channel(i));
                                         }
@@ -1236,17 +1529,11 @@ impl App {
                             self.row_editor(ui, s, snapshot, &members, &avatar);
                         }
                     }
-                    let group = Rect::from_min_max(
-                        Pos2::new(ui.max_rect().left(), group_top),
-                        Pos2::new(ui.max_rect().left() + full, ui.cursor().top()),
-                    );
-                    dashed_rect(ui.painter(), group, self.pal.line);
                     ui.add_space(10.0);
                 }
             });
         });
         self.rows.frame[0] = frame.response.rect;
-        dashed_rect(ui.painter(), frame.response.rect, self.pal.line);
     }
 
     fn unified_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
@@ -1262,17 +1549,15 @@ impl App {
             let title = |ui: &mut egui::Ui| {
                 ui.label(RichText::new(count).color(pal.dim));
                 let link =
-                    egui::Label::new(RichText::new(title).strong().color(pal.text)).truncate().sense(Sense::click());
+                    egui::Label::new(RichText::new(title).font(FontId::new(13.5, widgets::semibold())).color(pal.text))
+                        .truncate()
+                        .sense(Sense::click());
                 let link = ui.add(link).on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(hint);
                 if link.clicked() {
                     crate::system::open_url(MAPPING_DOCS);
                 }
             };
-            let controls = |ui: &mut egui::Ui| {
-                self.switch(ui, &mut s.show_unused);
-                ui.label(self.t(s, "unused"));
-            };
-            header(ui, "unified", title, controls);
+            header(ui, "unified", title, |_: &mut egui::Ui| {});
             ui.separator();
             egui::ScrollArea::vertical().id_salt("ue").auto_shrink([false, false]).show(ui, |ui| {
                 self.rows.view[1] = ui.clip_rect();
@@ -1287,36 +1572,26 @@ impl App {
                             && (self.matches(output.name) || self.matches(output.friendly))
                     })
                     .collect();
-                let content_top = ui.max_rect().top();
-                let (order, block) = self.pull_related(&shown, content_top);
-                let mut block_rect = Rect::NOTHING;
-                for (n, &i) in order.iter().enumerate() {
+                for &i in &shown {
                     let output = &OUTPUTS[i];
                     let is_bound = known && snapshot.bindings.get(i).is_some_and(Option::is_some);
                     let value = snapshot.outputs.get(i).copied().unwrap_or_default();
                     let text = output.label(s.friendly_names);
-                    let row = value_row(ui, &pal, text, value, is_bound || !known, None, related.outputs[i]);
-                    if block.contains(&n) {
-                        block_rect = block_rect.union(row.rect);
-                    }
+                    let mut spec = Row::new(text, value);
+                    spec.active = is_bound || !known;
+                    spec.signed = output.signed;
+                    spec.highlight = related.outputs[i];
+                    let row = value_row(ui, &pal, spec);
                     self.rows.outputs.push((i, row.rect));
+                    self.reveal(ui, 1, i, row.rect);
                     if row.hovered() {
                         self.hover_now = Some(Hover::Output(i));
                     }
                     row.on_hover_text(output.name);
                 }
-                if block_rect.is_positive() {
-                    ui.painter().rect_stroke(
-                        block_rect,
-                        CornerRadius::ZERO,
-                        Stroke::new(1.0, pal.dim),
-                        StrokeKind::Inside,
-                    );
-                }
             });
         });
         self.rows.frame[1] = frame.response.rect;
-        dashed_rect(ui.painter(), frame.response.rect, self.pal.line);
     }
 
     fn avatar_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
@@ -1341,13 +1616,9 @@ impl App {
             let title = format!("{} {name}", self.t(s, "avatar"));
             let title = |ui: &mut egui::Ui| {
                 ui.label(RichText::new(count).color(pal.dim));
-                ui.add(egui::Label::new(RichText::new(title).strong()).truncate());
+                ui.add(egui::Label::new(RichText::new(title).font(FontId::new(13.5, widgets::semibold()))).truncate());
             };
-            let controls = |ui: &mut egui::Ui| {
-                self.switch(ui, &mut s.show_unused);
-                ui.label(self.t(s, "unused"));
-            };
-            header(ui, "avatar", title, controls);
+            header(ui, "avatar", title, |_: &mut egui::Ui| {});
             ui.separator();
             egui::ScrollArea::vertical().id_salt("avatar").auto_shrink([false, false]).show(ui, |ui| {
                 self.rows.view[2] = ui.clip_rect();
@@ -1376,17 +1647,14 @@ impl App {
                     let value = snapshot.outputs.get(*i).copied().unwrap_or_default();
                     let bits = (binding.bit_count() > 0).then(|| binding.encode(value));
                     let expanded = self.expanded_bindings.contains(i);
-                    let arrow = if bits.is_none() {
-                        ""
-                    } else if expanded {
-                        "▾ "
-                    } else {
-                        "▸ "
-                    };
-                    let label = format!("{arrow}{}", output.label(s.friendly_names));
-                    let bit_boxes = bits.as_ref().map(|(b, _)| b.as_slice());
-                    let response = value_row(ui, &pal, &label, value, true, bit_boxes, related.outputs[*i]);
+                    let mut spec = Row::new(output.label(s.friendly_names), value);
+                    spec.signed = output.signed;
+                    spec.bits = bits.as_ref().map(|(b, _)| b.as_slice());
+                    spec.chevron = bits.is_some().then_some(expanded);
+                    spec.highlight = related.outputs[*i];
+                    let response = value_row(ui, &pal, spec);
                     self.rows.avatar.push((*i, response.rect));
+                    self.reveal(ui, 2, *i, response.rect);
                     if response.hovered() {
                         self.hover_now = Some(Hover::Avatar(*i));
                     }
@@ -1404,18 +1672,45 @@ impl App {
                 if s.show_unused {
                     for name in &unmatched {
                         if self.matches(name) {
-                            value_row(ui, &pal, name, 0.0, false, None, false);
+                            let mut spec = Row::new(name, 0.0);
+                            spec.active = false;
+                            value_row(ui, &pal, spec);
                         }
                     }
                 }
             });
         });
         self.rows.frame[2] = frame.response.rect;
-        dashed_rect(ui.painter(), frame.response.rect, self.pal.line);
     }
 
-    /// Lines from the hovered row to the rows it feeds or is fed by (see `pull_related` for
-    /// how a channel's expressions are brought into view).
+    /// Whether a row in `panel` is linked to the hovered row, which sits in another panel.
+    fn linked(&self, panel: usize, index: usize) -> bool {
+        match (self.hover, panel) {
+            // The hovered row's own panel.
+            (Some(Hover::Channel(_)), 0) | (Some(Hover::Output(_)), 1) | (Some(Hover::Avatar(_)), 2) => false,
+            (Some(Hover::Channel(c)), _) => self.mapper.dependencies(index).contains(&c),
+            (Some(Hover::Output(o) | Hover::Avatar(o)), 0) => self.mapper.dependencies(o).contains(&index),
+            (Some(Hover::Output(o) | Hover::Avatar(o)), _) => index == o,
+            _ => false,
+        }
+    }
+
+    /// While a row stays hovered, a linked row scrolled out of view in another panel is
+    /// scrolled into it, so the link has two visible ends.
+    fn reveal(&mut self, ui: &egui::Ui, panel: usize, index: usize, rect: Rect) {
+        if self.revealed[panel] || self.dwell.1.elapsed() < REVEAL_AFTER || !self.linked(panel, index) {
+            return;
+        }
+        let prev = &self.prev_rows;
+        let list = [&prev.channels, &prev.outputs, &prev.avatar][panel];
+        if Rows::off(list, index, prev.view[panel]) == 0.0 {
+            return;
+        }
+        self.revealed[panel] = true;
+        ui.scroll_to_rect(rect, Some(Align::Center));
+    }
+
+    /// Lines from the hovered row to the rows it feeds or is fed by.
     fn draw_links(&self, ui: &egui::Ui) {
         let Some(hover) = self.hover_now else { return };
         let (pal, rows) = (self.pal, &self.rows);
@@ -1423,6 +1718,19 @@ impl App {
         let painter = ui.painter();
         let stroke = Stroke::new(1.0, pal.text.gamma_multiply(0.85));
         let link = |a: Pos2, b: Pos2| painter.line_segment([a, b], stroke);
+        // A row scrolled out of its panel gets an arrow at the edge the link points to.
+        let marker = |x: f32, list: &[(usize, Rect)], index: usize, view: Rect| {
+            let dir = Rows::off(list, index, view);
+            if dir == 0.0 {
+                return;
+            }
+            let y = if dir > 0.0 { view.bottom() - 11.0 } else { view.top() + 11.0 };
+            let pill = Rect::from_center_size(Pos2::new(x, y), Vec2::new(26.0, 16.0));
+            painter.rect_filled(pill, CornerRadius::same(8), pal.accent);
+            let tip = Pos2::new(x, y + dir * 3.0);
+            let wing = |dx: f32| Pos2::new(x + dx, y - dir * 2.5);
+            painter.add(Shape::convex_polygon(vec![wing(-4.5), tip, wing(4.5)], pal.on_accent, Stroke::NONE));
+        };
         let to_avatar = |output: usize, y: f32| {
             // In the narrow layout the avatar panel sits under the expressions; a line
             // would cut across them.
@@ -1431,23 +1739,28 @@ impl App {
             }
             if let Some(ay) = Rows::y(&rows.avatar, output, rows.view[2]) {
                 link(Pos2::new(ue.right(), y), Pos2::new(avatar.left(), ay));
+                marker(avatar.left() + 20.0, &rows.avatar, output, rows.view[2]);
             }
         };
         match hover {
             Hover::Channel(c) => {
                 let Some(y) = Rows::y(&rows.channels, c, rows.view[0]) else { return };
+                marker(mp.right() - 20.0, &rows.channels, c, rows.view[0]);
                 for (o, _) in rows.outputs.iter().filter(|(o, _)| self.mapper.dependencies(*o).contains(&c)) {
                     if let Some(oy) = Rows::y(&rows.outputs, *o, rows.view[1]) {
                         link(Pos2::new(mp.right(), y), Pos2::new(ue.left(), oy));
+                        marker(ue.left() + 20.0, &rows.outputs, *o, rows.view[1]);
                         to_avatar(*o, oy);
                     }
                 }
             }
             Hover::Output(o) | Hover::Avatar(o) => {
                 let Some(y) = Rows::y(&rows.outputs, o, rows.view[1]) else { return };
+                marker(ue.left() + 20.0, &rows.outputs, o, rows.view[1]);
                 for &c in self.mapper.dependencies(o) {
                     if let Some(cy) = Rows::y(&rows.channels, c, rows.view[0]) {
                         link(Pos2::new(mp.right(), cy), Pos2::new(ue.left(), y));
+                        marker(mp.right() - 20.0, &rows.channels, c, rows.view[0]);
                     }
                 }
                 to_avatar(o, y);
@@ -1486,9 +1799,15 @@ impl App {
         ui.scope(|ui| {
             if plain {
                 let w = &mut ui.visuals_mut().widgets;
-                for state in [&mut w.inactive, &mut w.hovered, &mut w.active, &mut w.open] {
+                for state in [&mut w.inactive, &mut w.active] {
                     state.bg_stroke = Stroke::NONE;
                     state.weak_bg_fill = Color32::TRANSPARENT;
+                }
+                // Outlined and tinted on hover so it reads as something to open.
+                for state in [&mut w.hovered, &mut w.open] {
+                    state.bg_stroke = Stroke::new(1.0, self.pal.accent);
+                    state.weak_bg_fill = mix(self.pal.raised, self.pal.accent, 0.22);
+                    state.fg_stroke.color = self.pal.text;
                 }
                 w.inactive.fg_stroke.color = self.pal.dim;
             }
@@ -1517,186 +1836,235 @@ impl App {
         body: impl FnOnce(&mut egui::Ui),
     ) {
         let pal = self.pal;
-        Frame::new().stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin::symmetric(14, 12)).show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(title).strong());
-                if let Some(hint) = hint {
-                    let (rect, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
-                    let color = if response.hovered() { pal.text } else { pal.dim };
-                    ui.painter().circle_stroke(rect.center(), 7.0, Stroke::new(1.0, color));
-                    ui.painter().text(rect.center(), Align2::CENTER_CENTER, "?", FontId::monospace(10.0), color);
-                    response.on_hover_text(hint);
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(ms.map(|m| format!("{m:.2} ms")).unwrap_or_else(|| "—".into()));
+        Frame::new()
+            .fill(pal.raised)
+            .stroke(Stroke::new(1.0, pal.line))
+            .corner_radius(CornerRadius::same(widgets::RADIUS + 2))
+            .inner_margin(Margin::symmetric(14, 12))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(title).font(FontId::new(13.5, widgets::semibold())));
+                    if let Some(hint) = hint {
+                        let (rect, response) = ui.allocate_exact_size(Vec2::splat(16.0), Sense::hover());
+                        let color = if response.hovered() { pal.text } else { pal.dim };
+                        ui.painter().circle_stroke(rect.center(), 7.0, Stroke::new(1.0, color));
+                        ui.painter().text(rect.center(), Align2::CENTER_CENTER, "?", FontId::proportional(10.0), color);
+                        response.on_hover_text(hint);
+                    }
+                    if let Some(ms) = ms {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            ui.label(format!("{ms:.2} ms"));
+                        });
+                    }
                 });
+                ui.add_space(4.0);
+                body(ui);
             });
-            ui.add_space(4.0);
-            body(ui);
-        });
         ui.add_space(10.0);
     }
 
     fn settings_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
         let pal = self.pal;
-        egui::ScrollArea::vertical().id_salt("settings").show(ui, |ui| {
-            egui::Grid::new("ports").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
-                ui.label(RichText::new(self.t(s, "vrchat_port")).color(pal.dim));
-                ui.add(egui::DragValue::new(&mut s.send_port).range(1..=65535));
-                ui.end_row();
-                ui.label(RichText::new(self.t(s, "in_port")).color(pal.dim));
-                ui.add(egui::DragValue::new(&mut s.receive_port).range(1..=65535));
-                ui.end_row();
-                ui.label(RichText::new(self.t(s, "osc_host")).color(pal.dim));
-                ui.add(egui::TextEdit::singleline(&mut s.osc_host).desired_width(110.0));
-                ui.end_row();
-                ui.label(self.t(s, "interface_scale"));
-                egui::ComboBox::from_id_salt("scale").selected_text(percent(s.interface_scale)).show_ui(ui, |ui| {
-                    for scale in SCALES {
-                        ui.selectable_value(&mut s.interface_scale, scale, percent(scale));
+        ui.horizontal(|ui| {
+            ui.label(widgets::title(&pal, self.t(s, "settings")));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Close), false).clicked() {
+                    self.settings_open = false;
+                }
+            });
+        });
+        let tallest = (ui.ctx().content_rect().height() - 150.0).max(200.0);
+        egui::ScrollArea::vertical().id_salt("settings").max_height(tallest).min_scrolled_height(tallest).show(
+            ui,
+            |ui| {
+                self.section(ui, self.t(s, "section_connection"));
+                egui::Grid::new("ports").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label(RichText::new(self.t(s, "vrchat_port")).color(pal.dim));
+                    ui.add(egui::DragValue::new(&mut s.send_port).range(1..=65535));
+                    ui.end_row();
+                    ui.label(RichText::new(self.t(s, "in_port")).color(pal.dim));
+                    ui.add(egui::DragValue::new(&mut s.receive_port).range(1..=65535));
+                    ui.end_row();
+                    ui.label(RichText::new(self.t(s, "osc_host")).color(pal.dim));
+                    ui.add(egui::TextEdit::singleline(&mut s.osc_host).desired_width(110.0));
+                    ui.end_row();
+                });
+                ui.add_space(6.0);
+                let (interp, interp_hint) = (self.t(s, "interpolation"), self.t(s, "interpolation_hint"));
+                let (no_avatar, no_avatar_hint) =
+                    (self.t(s, "send_without_avatar"), self.t(s, "send_without_avatar_hint"));
+                self.labeled_switch(ui, &mut s.interpolation, interp, Some(interp_hint));
+                self.labeled_switch(ui, &mut s.send_without_avatar, no_avatar, Some(no_avatar_hint));
+
+                self.section(ui, self.t(s, "section_interface"));
+                egui::Grid::new("interface").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label(RichText::new(self.t(s, "interface_scale")).color(pal.dim));
+                    egui::ComboBox::from_id_salt("scale").selected_text(percent(s.interface_scale)).show_ui(ui, |ui| {
+                        for scale in SCALES {
+                            ui.selectable_value(&mut s.interface_scale, scale, percent(scale));
+                        }
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new(self.t(s, "idle_sleep")).color(pal.dim))
+                        .on_hover_text(self.t(s, "idle_hint"));
+                    let current = if s.idle_sleep {
+                        format!("{} {}", s.idle_minutes, self.t(s, "min"))
+                    } else {
+                        self.t(s, "never").into()
+                    };
+                    egui::ComboBox::from_id_salt("idle").selected_text(current).show_ui(ui, |ui| {
+                        if ui.selectable_label(!s.idle_sleep, self.t(s, "never")).clicked() {
+                            s.idle_sleep = false;
+                        }
+                        for m in IDLE_MINUTES {
+                            let label = format!("{m} {}", self.t(s, "min"));
+                            if ui.selectable_label(s.idle_sleep && s.idle_minutes == m, label).clicked() {
+                                s.idle_sleep = true;
+                                s.idle_minutes = m;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.add_space(6.0);
+                let friendly = self.t(s, "friendly_names");
+                let (to_tray, to_tray_hint) = (self.t(s, "close_to_tray"), self.t(s, "close_to_tray_hint"));
+                let debug = self.t(s, "debug_performance");
+                self.labeled_switch(ui, &mut s.friendly_names, friendly, None);
+                self.labeled_switch(ui, &mut s.close_to_tray, to_tray, Some(to_tray_hint));
+                self.labeled_switch(ui, &mut s.debug, debug, None);
+
+                self.section(ui, self.t(s, "camera"));
+                egui::Grid::new("camera-settings").num_columns(2).spacing([16.0, 10.0]).show(ui, |ui| {
+                    ui.label(RichText::new(self.t(s, "resolution")).color(pal.dim));
+                    let current = format!("{}×{}", s.resolution.0, s.resolution.1);
+                    egui::ComboBox::from_id_salt("resolution").selected_text(current).show_ui(ui, |ui| {
+                        for r in RESOLUTIONS {
+                            ui.selectable_value(&mut s.resolution, r, format!("{}×{}", r.0, r.1));
+                        }
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new(self.t(s, "camera_fps")).color(pal.dim));
+                    egui::ComboBox::from_id_salt("fps").selected_text(s.camera_fps.to_string()).show_ui(ui, |ui| {
+                        for fps in [30, 60] {
+                            ui.selectable_value(&mut s.camera_fps, fps, fps.to_string());
+                        }
+                    });
+                    ui.end_row();
+                });
+                ui.add_space(6.0);
+                let blur = self.t(s, "blur_preview");
+                self.labeled_switch(ui, &mut s.camera_blur, blur, None);
+
+                self.section(ui, self.t(s, "section_processing"));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(self.t(s, "processing_devices")).color(pal.dim))
+                        .on_hover_text(self.t(s, "devices_hint"));
+                    let mut all = if s.face_device == s.tongue_device { s.face_device } else { Device::Auto };
+                    let before = all;
+                    self.device_picker(ui, s, "all-devices", &mut all, self.t(s, "all"), false);
+                    if all != before {
+                        s.face_device = all;
+                        s.tongue_device = all;
                     }
                 });
-                ui.end_row();
-                ui.label(self.t(s, "idle_sleep")).on_hover_text(self.t(s, "idle_hint"));
-                let current = if s.idle_sleep {
-                    format!("{} {}", s.idle_minutes, self.t(s, "min"))
-                } else {
-                    self.t(s, "never").into()
-                };
-                egui::ComboBox::from_id_salt("idle").selected_text(current).show_ui(ui, |ui| {
-                    if ui.selectable_label(!s.idle_sleep, self.t(s, "never")).clicked() {
-                        s.idle_sleep = false;
+                ui.add_space(8.0);
+                if cfg!(not(feature = "directml")) {
+                    ui.label(
+                        RichText::new("GPU inference needs a build with the `directml` feature.")
+                            .color(pal.dim)
+                            .small(),
+                    );
+                }
+                let perf = self.shared.perf.lock().clone();
+                let avg = |stage: Stage| perf.stages.get(&stage).and_then(|st| st.average(Duration::from_secs(1)));
+                let (capture, capture_hint) = (self.t(s, "camera_capture"), self.t(s, "capture_hint"));
+                let camera_ms = avg(Stage::ReadWait).map(|read| read + avg(Stage::Convert).unwrap_or(0.0));
+                self.stage_box(ui, capture, camera_ms, Some(capture_hint), |ui| {
+                    ui.label(RichText::new("Media Foundation").color(pal.dim));
+                });
+                self.stage_box(ui, "MediaPipe", avg(Stage::MediaPipe), Some(self.t(s, "mediapipe_hint")), |ui| {
+                    let mut d = s.face_device;
+                    self.device_picker(ui, s, "face-device", &mut d, "", true);
+                    s.face_device = d;
+                    if !snapshot.face_device.is_empty() && snapshot.face_device != self.device_name(s, d) {
+                        ui.label(RichText::new(&snapshot.face_device).color(pal.dim).small());
                     }
-                    for m in IDLE_MINUTES {
-                        let label = format!("{m} {}", self.t(s, "min"));
-                        if ui.selectable_label(s.idle_sleep && s.idle_minutes == m, label).clicked() {
-                            s.idle_sleep = true;
-                            s.idle_minutes = m;
+                });
+                let tongue_ms = avg(Stage::Tongue).filter(|_| snapshot.tongue == TongueStatus::Ready);
+                let tongue = self.t(s, "tongue");
+                self.stage_box(ui, tongue, tongue_ms, Some(self.t(s, "tongue_stage_hint")), |ui| {
+                    match &snapshot.tongue {
+                        TongueStatus::Ready => {
+                            let mut d = s.tongue_device;
+                            self.device_picker(ui, s, "tongue-device", &mut d, "", true);
+                            s.tongue_device = d;
+                        }
+                        TongueStatus::Off => {
+                            ui.label(RichText::new(self.t(s, "enable_tongue")).color(pal.dim));
+                        }
+                        TongueStatus::Missing => {
+                            ui.label(RichText::new(self.t(s, "tongue_missing")).color(pal.dim));
+                        }
+                        TongueStatus::Error(e) => {
+                            ui.label(RichText::new(e).color(pal.dim));
                         }
                     }
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button(self.t(s, "import_tongue")).clicked() {
+                            self.import_tongue();
+                        }
+                        if tracker::tongue_path(&self.model_dir).is_some() {
+                            self.ok_label(ui, self.t(s, "tongue_ready"));
+                        }
+                    });
                 });
-                ui.end_row();
-                ui.label(self.t(s, "resolution"));
-                let current = format!("{}×{}", s.resolution.0, s.resolution.1);
-                egui::ComboBox::from_id_salt("resolution").selected_text(current).show_ui(ui, |ui| {
-                    for r in RESOLUTIONS {
-                        ui.selectable_value(&mut s.resolution, r, format!("{}×{}", r.0, r.1));
-                    }
-                });
-                ui.end_row();
-                ui.label(self.t(s, "camera_fps"));
-                egui::ComboBox::from_id_salt("fps").selected_text(s.camera_fps.to_string()).show_ui(ui, |ui| {
-                    for fps in [30, 60] {
-                        ui.selectable_value(&mut s.camera_fps, fps, fps.to_string());
-                    }
-                });
-                ui.end_row();
-            });
-            ui.add_space(6.0);
-            let (friendly, interp, interp_hint) =
-                (self.t(s, "friendly_names"), self.t(s, "interpolation"), self.t(s, "interpolation_hint"));
-            let (no_avatar, no_avatar_hint) = (self.t(s, "send_without_avatar"), self.t(s, "send_without_avatar_hint"));
-            self.labeled_switch(ui, &mut s.friendly_names, friendly, None);
-            self.labeled_switch(ui, &mut s.interpolation, interp, Some(interp_hint));
-            self.labeled_switch(ui, &mut s.send_without_avatar, no_avatar, Some(no_avatar_hint));
-            let (to_tray, to_tray_hint) = (self.t(s, "close_to_tray"), self.t(s, "close_to_tray_hint"));
-            self.labeled_switch(ui, &mut s.close_to_tray, to_tray, Some(to_tray_hint));
-            ui.separator();
+                self.section(ui, self.t(s, "updates"));
+                self.updates_section(ui, s);
 
-            ui.label(RichText::new(self.t(s, "updates")).strong());
-            self.updates_section(ui, s);
-            ui.separator();
-
-            let (debug, blur) = (self.t(s, "debug_performance"), self.t(s, "blur_preview"));
-            self.labeled_switch(ui, &mut s.debug, debug, None);
-            self.labeled_switch(ui, &mut s.camera_blur, blur, None);
-            ui.add_space(6.0);
-
-            ui.horizontal(|ui| {
-                ui.label(self.t(s, "processing_devices"));
-                let mut all = if s.face_device == s.tongue_device { s.face_device } else { Device::Auto };
-                let before = all;
-                self.device_picker(ui, s, "all-devices", &mut all, self.t(s, "all"), false);
-                if all != before {
-                    s.face_device = all;
-                    s.tongue_device = all;
+                self.section(ui, self.t(s, "section_data"));
+                if self.data_size.1.elapsed() > Duration::from_secs(10) {
+                    self.data_size = (config::dir_size(&config::data_dir()), Instant::now());
                 }
-            });
-            ui.add_space(8.0);
-            if cfg!(not(feature = "directml")) {
-                ui.label(
-                    RichText::new("GPU inference needs a build with the `directml` feature.").color(pal.dim).small(),
-                );
-            }
-            let perf = self.shared.perf.lock().clone();
-            let avg = |stage: Stage| perf.stages.get(&stage).and_then(|st| st.average(Duration::from_secs(1)));
-            let (capture, capture_hint) = (self.t(s, "camera_capture"), self.t(s, "capture_hint"));
-            let camera_ms = avg(Stage::ReadWait).map(|read| read + avg(Stage::Convert).unwrap_or(0.0));
-            self.stage_box(ui, capture, camera_ms, Some(capture_hint), |ui| {
-                ui.label(RichText::new("Media Foundation").color(pal.dim));
-            });
-            self.stage_box(ui, "MediaPipe", avg(Stage::MediaPipe), None, |ui| {
-                let mut d = s.face_device;
-                self.device_picker(ui, s, "face-device", &mut d, "", true);
-                s.face_device = d;
-                if !snapshot.face_device.is_empty() && snapshot.face_device != self.device_name(s, d) {
-                    ui.label(RichText::new(&snapshot.face_device).color(pal.dim).small());
-                }
-            });
-            let tongue_ms = avg(Stage::Tongue).filter(|_| snapshot.tongue == TongueStatus::Ready);
-            let tongue = self.t(s, "tongue");
-            self.stage_box(ui, tongue, tongue_ms, None, |ui| {
-                match &snapshot.tongue {
-                    TongueStatus::Ready => {
-                        let mut d = s.tongue_device;
-                        self.device_picker(ui, s, "tongue-device", &mut d, "", true);
-                        s.tongue_device = d;
-                    }
-                    TongueStatus::Off => {
-                        ui.label(RichText::new(self.t(s, "enable_tongue")).color(pal.dim));
-                    }
-                    TongueStatus::Missing => {
-                        ui.label(RichText::new(self.t(s, "tongue_missing")).color(pal.dim));
-                    }
-                    TongueStatus::Error(e) => {
-                        ui.label(RichText::new(e).color(pal.dim));
-                    }
-                }
-                ui.add_space(6.0);
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button(self.t(s, "import_tongue")).clicked() {
-                        self.import_tongue();
-                    }
-                    if tracker::tongue_path(&self.model_dir).is_some() {
-                        ui.label(RichText::new(format!("✔ {}", self.t(s, "tongue_ready"))).color(pal.dim));
-                    }
-                });
-            });
-            ui.separator();
-
-            if self.data_size.1.elapsed() > Duration::from_secs(10) {
-                self.data_size = (config::dir_size(&config::data_dir()), Instant::now());
-            }
-            let armed = self.erase_armed.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
-            let text = if armed {
-                self.t(s, "erase_confirm").to_string()
-            } else {
-                format!("{} ({})", self.t(s, "erase"), mib(self.data_size.0))
-            };
-            let button = egui::Button::new(text).min_size(Vec2::new(ui.available_width(), 28.0));
-            if ui.add(button).on_hover_text(self.t(s, "erase_hint")).clicked() {
-                if armed {
-                    if let Err(e) = config::erase_all() {
-                        log::warn!("erasing app data: {e:#}");
-                    }
-                    // Restart without saving so nothing is written back.
-                    let _ = updater::restart();
+                let armed = self.erase_armed.is_some_and(|t| t.elapsed() < Duration::from_secs(4));
+                let text = if armed {
+                    self.t(s, "erase_confirm").to_string()
                 } else {
-                    self.erase_armed = Some(Instant::now());
+                    format!("{} ({})", self.t(s, "erase"), mib(self.data_size.0))
+                };
+                let button = egui::Button::new(text).min_size(Vec2::new(ui.available_width(), 28.0));
+                if ui.add(button).on_hover_text(self.t(s, "erase_hint")).clicked() {
+                    if armed {
+                        if let Err(e) = config::erase_all() {
+                            log::warn!("erasing app data: {e:#}");
+                        }
+                        // Restart without saving so nothing is written back.
+                        let _ = updater::restart();
+                    } else {
+                        self.erase_armed = Some(Instant::now());
+                    }
                 }
-            }
-        });
+
+                ui.add_space(14.0);
+                ui.label(RichText::new(concat!("VRC Openface v", env!("CARGO_PKG_VERSION"))).color(pal.dim));
+            },
+        );
+    }
+
+    /// A done state: a green check and a line of text.
+    fn ok_label(&self, ui: &mut egui::Ui, text: &str) {
+        let (rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+        icons::paint(ui.painter(), Glyph::Check, rect, self.pal.ok);
+        ui.label(RichText::new(text).color(self.pal.dim));
+    }
+
+    /// Heading of a group in the settings.
+    fn section(&self, ui: &mut egui::Ui, title: &str) {
+        ui.add_space(16.0);
+        ui.label(RichText::new(title).font(FontId::new(12.0, widgets::semibold())).color(self.pal.dim));
+        ui.add_space(2.0);
     }
 
     fn updates_section(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
@@ -1787,7 +2155,7 @@ impl App {
         let mut install = None;
         ui.horizontal(|ui| {
             if release.version() == env!("CARGO_PKG_VERSION") {
-                ui.label(RichText::new(format!("✔ {}", self.t(s, "up_to_date"))).color(self.pal.dim));
+                self.ok_label(ui, self.t(s, "up_to_date"));
             } else {
                 let newer = updater::is_newer(release.version(), env!("CARGO_PKG_VERSION"));
                 let key = if newer { "update_now" } else { "install_restart" };
@@ -1833,187 +2201,326 @@ impl App {
         let language = s.language;
         let t = |key: &str| tr(language, key);
         let (one, twelve) = (Duration::from_secs(1), Duration::from_secs(12));
-        egui::Window::new(t("debug_performance"))
-            .id(egui::Id::unique("debug-performance"))
-            .open(&mut open)
-            .default_width(540.0)
-            .min_width(460.0)
-            .show(ctx, |ui| {
-                ui.spacing_mut().item_spacing.y = 6.0;
-                // Latency bars: where each frame spends its time on the way to each result.
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t("latency")).strong());
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        for (segment, key) in [
-                            (Segment::Waiting, "perf_waiting"),
-                            (Segment::Work(Group::Interface), "perf_interface"),
-                            (Segment::Work(Group::Core), "perf_core"),
-                            (Segment::Work(Group::Tracker), "perf_tracker"),
-                        ] {
-                            ui.label(RichText::new(t(key)).small());
-                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                            paint_segment(ui.painter(), rect, segment, &pal, None);
-                        }
-                    });
-                });
-                let rows: Vec<(Path, Option<perf::Breakdown>)> =
-                    Path::ALL.iter().map(|p| (*p, perf.paths.get(p).and_then(|series| series.average(one)))).collect();
-                let longest = rows
-                    .iter()
-                    .filter_map(|(_, b)| b.as_ref().map(|b| b.iter().map(|(_, v)| v).sum::<f32>()))
-                    .fold(0.0f32, f32::max);
-                let scale = ((longest / 10.0).ceil() * 10.0).max(30.0);
-                let (label_w, value_w) = (130.0, 64.0);
-                let (axis, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
-                let bar_x = |rect: Rect, v: f32| rect.left() + label_w + v / scale * (rect.width() - label_w - value_w);
-                let ticks: Vec<f32> = (0..=(scale / 10.0) as usize).map(|i| i as f32 * 10.0).collect();
-                for &tick in &ticks {
-                    ui.painter().text(
-                        Pos2::new(bar_x(axis, tick), axis.center().y),
-                        Align2::CENTER_CENTER,
-                        format!("{tick:.0}"),
-                        FontId::monospace(10.5),
-                        pal.dim,
-                    );
+        let builder = egui::ViewportBuilder::default()
+            .with_title(t("debug_performance"))
+            .with_decorations(false)
+            .with_inner_size([620.0, 780.0])
+            .with_min_inner_size([480.0, 420.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("debug_performance"), builder, |ui, _class| {
+            if ui.ctx().input(|i| i.viewport().close_requested()) {
+                open = false;
+            }
+            resize_edges(ui.ctx());
+            let bar = Frame::new().fill(pal.bg).inner_margin(Margin::symmetric(14, 8));
+            egui::Panel::top("debug-bar").frame(bar).show(ui, |ui| {
+                // Same as the main window: the bar drags it, a double click maximizes it.
+                let drag = ui.interact(ui.max_rect(), ui.make_persistent_id("debug_drag"), Sense::click_and_drag());
+                let ctx = ui.ctx().clone();
+                let inside =
+                    ctx.pointer_hover_pos().is_some_and(|p| ctx.content_rect().shrink(RESIZE_BAND * 2.0).contains(p));
+                if drag.drag_started_by(egui::PointerButton::Primary) && inside {
+                    ui.send_viewport_cmd(egui::ViewportCommand::StartDrag);
                 }
-                ui.painter().text(axis.right_center(), Align2::RIGHT_CENTER, "ms", FontId::monospace(10.5), pal.dim);
-                for (path, breakdown) in &rows {
-                    let (row, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
-                    let painter = ui.painter_at(row);
-                    let name = t(path.text_key());
-                    painter.text(row.left_center(), Align2::LEFT_CENTER, name, FontId::monospace(11.5), pal.text);
-                    for &tick in &ticks {
-                        painter.vline(bar_x(row, tick), row.y_range(), Stroke::new(1.0, pal.line.gamma_multiply(0.5)));
-                    }
-                    let Some(breakdown) = breakdown else {
-                        painter.text(row.right_center(), Align2::RIGHT_CENTER, "—", FontId::monospace(11.5), pal.dim);
-                        continue;
-                    };
-                    let mut x = bar_x(row, 0.0);
-                    let mut total = 0.0;
-                    for (segment, v) in breakdown {
-                        total += v;
-                        let end = bar_x(row, total);
-                        let rect = Rect::from_x_y_ranges(x..=end, row.top() + 3.0..=row.bottom() - 3.0);
-                        if rect.width() >= 0.5 {
-                            paint_segment(&painter, rect, *segment, &pal, Some(t("perf_queue")));
-                        }
-                        x = end;
-                    }
-                    let text = format!("{total:.1} ms");
-                    painter.text(row.right_center(), Align2::RIGHT_CENTER, text, FontId::monospace(11.5), pal.text);
+                let maximized = ui.input(|i| i.viewport().maximized).unwrap_or(false);
+                if drag.double_clicked() {
+                    ui.send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
                 }
-                ui.separator();
-
-                // Totals over time.
-                let history = |path: Path| -> Vec<(f32, f32)> {
-                    perf.paths.get(&path).map(|series| series.total.history().collect()).unwrap_or_default()
-                };
-                let osc = perf.paths.get(&Path::MediaPipeOsc).and_then(|series| series.total.average(twelve));
                 ui.horizontal(|ui| {
-                    ui.label(t("total_latency"));
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(osc.map(|v| format!("{v:.0} ms")).unwrap_or_else(|| "—".into()));
-                    });
-                });
-                let lines = [
-                    (history(Path::MediaPipeOsc), group_color(Group::Core), false, "OSC"),
-                    (history(Path::Tables), group_color(Group::Interface), false, t("path_tables")),
-                    (history(Path::Preview), pal.text, true, t("path_preview")),
-                ];
-                multi_graph(ui, &pal, &lines, 12.0);
-                ui.horizontal(|ui| {
-                    for (_, color, dashed, name) in &lines {
-                        let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 10.0), Sense::hover());
-                        let points = [rect.left_center(), rect.right_center()];
-                        if *dashed {
-                            ui.painter().extend(Shape::dashed_line(&points, Stroke::new(1.5, *color), 3.0, 2.0));
-                        } else {
-                            ui.painter().line_segment(points, Stroke::new(1.5, *color));
-                        }
-                        ui.label(RichText::new(*name).small());
-                        ui.add_space(6.0);
+                    if let Some(mark) = &self.mark {
+                        ui.add(egui::Image::new((mark.id(), Vec2::splat(20.0))));
                     }
-                });
-                ui.separator();
-
-                // Memory over the last 10 minutes.
-                let now = Instant::now();
-                let to_mib = |b: u64| b as f32 / (1024.0 * 1024.0);
-                let series = |pick: fn(&perf::MemorySample) -> u64| -> Vec<(f32, f32)> {
-                    perf.memory.iter().map(|(at, m)| (now.duration_since(*at).as_secs_f32(), to_mib(pick(m)))).collect()
-                };
-                let private = series(|m| m.private);
-                let working = series(|m| m.working);
-                let (lo, hi) = private.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
-                ui.horizontal(|ui| {
-                    ui.label(t("memory"));
+                    ui.label(RichText::new(t("debug_performance")).font(FontId::new(14.0, widgets::semibold())));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if hi >= lo {
-                            ui.label(format!("±{:.0} MiB", (hi - lo) / 2.0));
+                        if widgets::window_button(ui, &pal, Glyph::Close, true).clicked() {
+                            open = false;
+                        }
+                        let (glyph, target) = if maximized { (Glyph::Restore, false) } else { (Glyph::Maximize, true) };
+                        if widgets::window_button(ui, &pal, glyph, false).clicked() {
+                            ui.send_viewport_cmd(egui::ViewportCommand::Maximized(target));
+                        }
+                        if widgets::window_button(ui, &pal, Glyph::Minimize, false).clicked() {
+                            ui.send_viewport_cmd(egui::ViewportCommand::Minimized(true));
                         }
                     });
-                });
-                graph(ui, &pal, &private, 600.0, None);
-                egui::Grid::new("memory-table").num_columns(4).spacing([18.0, 4.0]).show(ui, |ui| {
-                    ui.label("");
-                    for key in ["mem_now", "mem_change", "mem_trend"] {
-                        ui.label(RichText::new(t(key)).color(pal.dim).small());
-                    }
-                    ui.end_row();
-                    for (key, points) in [("mem_private", &private), ("mem_working", &working)] {
-                        ui.label(t(key));
-                        let (first, last) = (points.first().map(|p| p.1), points.last().map(|p| p.1));
-                        ui.label(last.map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into()));
-                        ui.label(first.zip(last).map(|(a, b)| format!("{:+.1}", b - a)).unwrap_or_else(|| "—".into()));
-                        // Points carry their age; the trend needs time running forward, in minutes.
-                        let forward: Vec<(f32, f32)> = points.iter().map(|(age, v)| (-age / 60.0, *v)).collect();
-                        // The first minute is mostly start-up loading, not a trend.
-                        let span = points.first().map_or(0.0, |p| p.0);
-                        let trend = perf::trend_per_minute(&forward).filter(|_| span >= 60.0);
-                        ui.label(trend.map(|v| format!("{v:+.2}")).unwrap_or_else(|| "—".into()));
-                        ui.end_row();
-                    }
-                });
-                ui.separator();
-
-                // Stage averages, by where they run.
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(t("averages")).color(pal.dim).small());
-                    });
-                });
-                let value = |stage: Stage, over: Duration| {
-                    perf.average(stage, over).map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into())
-                };
-                egui::Grid::new("stage-groups").num_columns(2).spacing([28.0, 12.0]).show(ui, |ui| {
-                    for pair in Group::ALL.chunks(2) {
-                        for &group in pair {
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| {
-                                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
-                                    paint_segment(ui.painter(), rect, Segment::Work(group), &pal, None);
-                                    ui.label(RichText::new(t(group.text_key())).strong());
-                                });
-                                egui::Grid::new(("stages", group)).num_columns(3).spacing([14.0, 2.0]).show(ui, |ui| {
-                                    for stage in Stage::ALL.into_iter().filter(|st| st.group() == group) {
-                                        ui.label(t(stage.text_key()));
-                                        ui.label(value(stage, one));
-                                        ui.label(value(stage, twelve));
-                                        ui.end_row();
-                                    }
-                                });
-                            });
-                        }
-                        ui.end_row();
-                    }
                 });
             });
+            egui::CentralPanel::default().frame(Frame::new().fill(pal.bg).inner_margin(Margin::same(14))).show(
+                ui,
+                |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        // Latency bars: where each frame spends its time on the way to each result.
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(t("latency")).strong());
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                for (segment, key) in [
+                                    (Segment::Waiting, "perf_waiting"),
+                                    (Segment::Work(Group::Interface), "perf_interface"),
+                                    (Segment::Work(Group::Core), "perf_core"),
+                                    (Segment::Work(Group::Tracker), "perf_tracker"),
+                                ] {
+                                    ui.label(RichText::new(t(key)).small());
+                                    let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                    paint_segment(ui.painter(), rect, segment, &pal, None);
+                                }
+                            });
+                        });
+                        let rows: Vec<(Path, Option<perf::Breakdown>)> = Path::ALL
+                            .iter()
+                            .map(|p| (*p, perf.paths.get(p).and_then(|series| series.average(one))))
+                            .collect();
+                        let longest = rows
+                            .iter()
+                            .filter_map(|(_, b)| b.as_ref().map(|b| b.iter().map(|(_, v)| v).sum::<f32>()))
+                            .fold(0.0f32, f32::max);
+                        let scale = ((longest / 10.0).ceil() * 10.0).max(30.0);
+                        let (label_w, value_w) = (130.0, 64.0);
+                        let (axis, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 16.0), Sense::hover());
+                        let bar_x =
+                            |rect: Rect, v: f32| rect.left() + label_w + v / scale * (rect.width() - label_w - value_w);
+                        let ticks: Vec<f32> = (0..=(scale / 10.0) as usize).map(|i| i as f32 * 10.0).collect();
+                        for &tick in &ticks {
+                            ui.painter().text(
+                                Pos2::new(bar_x(axis, tick), axis.center().y),
+                                Align2::CENTER_CENTER,
+                                format!("{tick:.0}"),
+                                FontId::proportional(10.5),
+                                pal.dim,
+                            );
+                        }
+                        ui.painter().text(
+                            axis.right_center(),
+                            Align2::RIGHT_CENTER,
+                            "ms",
+                            FontId::proportional(10.5),
+                            pal.dim,
+                        );
+                        for (path, breakdown) in &rows {
+                            let (row, _) =
+                                ui.allocate_exact_size(Vec2::new(ui.available_width(), 22.0), Sense::hover());
+                            let painter = ui.painter_at(row);
+                            let name = t(path.text_key());
+                            painter.text(
+                                row.left_center(),
+                                Align2::LEFT_CENTER,
+                                name,
+                                FontId::proportional(11.5),
+                                pal.text,
+                            );
+                            for &tick in &ticks {
+                                painter.vline(
+                                    bar_x(row, tick),
+                                    row.y_range(),
+                                    Stroke::new(1.0, pal.line.gamma_multiply(0.5)),
+                                );
+                            }
+                            let Some(breakdown) = breakdown else {
+                                painter.text(
+                                    row.right_center(),
+                                    Align2::RIGHT_CENTER,
+                                    "—",
+                                    FontId::proportional(11.5),
+                                    pal.dim,
+                                );
+                                continue;
+                            };
+                            let mut x = bar_x(row, 0.0);
+                            let mut total = 0.0;
+                            for (segment, v) in breakdown {
+                                total += v;
+                                let end = bar_x(row, total);
+                                let rect = Rect::from_x_y_ranges(x..=end, row.top() + 3.0..=row.bottom() - 3.0);
+                                if rect.width() >= 0.5 {
+                                    paint_segment(&painter, rect, *segment, &pal, Some(t("perf_queue")));
+                                }
+                                x = end;
+                            }
+                            let text = format!("{total:.1} ms");
+                            painter.text(
+                                row.right_center(),
+                                Align2::RIGHT_CENTER,
+                                text,
+                                FontId::proportional(11.5),
+                                pal.text,
+                            );
+                        }
+                        ui.separator();
+
+                        // Totals over time.
+                        let history = |path: Path| -> Vec<(f32, f32)> {
+                            perf.paths.get(&path).map(|series| series.total.history().collect()).unwrap_or_default()
+                        };
+                        let osc = perf.paths.get(&Path::MediaPipeOsc).and_then(|series| series.total.average(twelve));
+                        ui.horizontal(|ui| {
+                            ui.label(t("total_latency"));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(osc.map(|v| format!("{v:.0} ms")).unwrap_or_else(|| "—".into()));
+                            });
+                        });
+                        let lines = [
+                            (history(Path::MediaPipeOsc), group_color(Group::Core), false, "OSC"),
+                            (history(Path::Tables), group_color(Group::Interface), false, t("path_tables")),
+                            (history(Path::Preview), pal.text, true, t("path_preview")),
+                        ];
+                        multi_graph(ui, &pal, &lines, 12.0);
+                        ui.horizontal(|ui| {
+                            for (_, color, dashed, name) in &lines {
+                                let (rect, _) = ui.allocate_exact_size(Vec2::new(14.0, 10.0), Sense::hover());
+                                let points = [rect.left_center(), rect.right_center()];
+                                if *dashed {
+                                    ui.painter().extend(Shape::dashed_line(
+                                        &points,
+                                        Stroke::new(1.5, *color),
+                                        3.0,
+                                        2.0,
+                                    ));
+                                } else {
+                                    ui.painter().line_segment(points, Stroke::new(1.5, *color));
+                                }
+                                ui.label(RichText::new(*name).small());
+                                ui.add_space(6.0);
+                            }
+                        });
+                        ui.separator();
+
+                        // Memory over the last 10 minutes.
+                        let now = Instant::now();
+                        let to_mib = |b: u64| b as f32 / (1024.0 * 1024.0);
+                        let series = |pick: fn(&perf::MemorySample) -> u64| -> Vec<(f32, f32)> {
+                            perf.memory
+                                .iter()
+                                .map(|(at, m)| (now.duration_since(*at).as_secs_f32(), to_mib(pick(m))))
+                                .collect()
+                        };
+                        let private = series(|m| m.private);
+                        let working = series(|m| m.working);
+                        let (lo, hi) =
+                            private.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| (lo.min(p.1), hi.max(p.1)));
+                        ui.horizontal(|ui| {
+                            ui.label(t("memory"));
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if hi >= lo {
+                                    ui.label(format!("±{:.0} MiB", (hi - lo) / 2.0));
+                                }
+                            });
+                        });
+                        graph(ui, &pal, &private, 600.0, None);
+                        egui::Grid::new("memory-table").num_columns(4).spacing([18.0, 4.0]).show(ui, |ui| {
+                            ui.label("");
+                            for key in ["mem_now", "mem_change", "mem_trend"] {
+                                ui.label(RichText::new(t(key)).color(pal.dim).small());
+                            }
+                            ui.end_row();
+                            for (key, points) in [("mem_private", &private), ("mem_working", &working)] {
+                                ui.label(t(key));
+                                let (first, last) = (points.first().map(|p| p.1), points.last().map(|p| p.1));
+                                ui.label(last.map(|v| format!("{v:.0}")).unwrap_or_else(|| "—".into()));
+                                ui.label(
+                                    first
+                                        .zip(last)
+                                        .map(|(a, b)| format!("{:+.1}", b - a))
+                                        .unwrap_or_else(|| "—".into()),
+                                );
+                                // Points carry their age; the trend needs time running forward, in minutes.
+                                let forward: Vec<(f32, f32)> =
+                                    points.iter().map(|(age, v)| (-age / 60.0, *v)).collect();
+                                // The first minute is mostly start-up loading, not a trend.
+                                let span = points.first().map_or(0.0, |p| p.0);
+                                let trend = perf::trend_per_minute(&forward).filter(|_| span >= 60.0);
+                                ui.label(trend.map(|v| format!("{v:+.2}")).unwrap_or_else(|| "—".into()));
+                                ui.end_row();
+                            }
+                        });
+                        ui.separator();
+
+                        // Stage averages, by where they run.
+                        ui.horizontal(|ui| {
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(t("averages")).color(pal.dim).small());
+                            });
+                        });
+                        let value = |stage: Stage, over: Duration| {
+                            perf.average(stage, over).map(|v| format!("{v:.2}")).unwrap_or_else(|| "—".into())
+                        };
+                        egui::Grid::new("stage-groups").num_columns(2).spacing([28.0, 12.0]).show(ui, |ui| {
+                            for pair in Group::ALL.chunks(2) {
+                                for &group in pair {
+                                    ui.vertical(|ui| {
+                                        ui.horizontal(|ui| {
+                                            let (rect, _) = ui.allocate_exact_size(Vec2::splat(10.0), Sense::hover());
+                                            paint_segment(ui.painter(), rect, Segment::Work(group), &pal, None);
+                                            ui.label(RichText::new(t(group.text_key())).strong());
+                                        });
+                                        egui::Grid::new(("stages", group)).num_columns(3).spacing([14.0, 2.0]).show(
+                                            ui,
+                                            |ui| {
+                                                for stage in Stage::ALL.into_iter().filter(|st| st.group() == group) {
+                                                    ui.label(t(stage.text_key()));
+                                                    ui.label(value(stage, one));
+                                                    ui.label(value(stage, twelve));
+                                                    ui.end_row();
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    });
+                },
+            );
+        });
         s.debug = open;
     }
 
     fn sleeping(&self, s: &Settings) -> bool {
         s.idle_sleep && self.last_activity.elapsed() > Duration::from_secs(s.idle_minutes as u64 * 60)
+    }
+}
+
+/// Turns the outer `RESIZE_BAND` points of a frameless window into resize handles.
+fn resize_edges(ctx: &egui::Context) {
+    use egui::viewport::ResizeDirection as Edge;
+    let (maximized, fullscreen) = ctx.input(|i| {
+        let v = i.viewport();
+        (v.maximized.unwrap_or(false), v.fullscreen.unwrap_or(false))
+    });
+    if maximized || fullscreen {
+        return;
+    }
+    let Some(pos) = ctx.pointer_hover_pos() else { return };
+    let rect = ctx.content_rect();
+    let (left, right) = (pos.x - rect.left(), rect.right() - pos.x);
+    let (top, bottom) = (pos.y - rect.top(), rect.bottom() - pos.y);
+    let corner = RESIZE_BAND * 2.0;
+    let edge = if left < corner && top < corner {
+        Edge::NorthWest
+    } else if right < corner && top < corner {
+        Edge::NorthEast
+    } else if left < corner && bottom < corner {
+        Edge::SouthWest
+    } else if right < corner && bottom < corner {
+        Edge::SouthEast
+    } else if left < RESIZE_BAND {
+        Edge::West
+    } else if right < RESIZE_BAND {
+        Edge::East
+    } else if top < RESIZE_BAND {
+        Edge::North
+    } else if bottom < RESIZE_BAND {
+        Edge::South
+    } else {
+        return;
+    };
+    ctx.set_cursor_icon(match edge {
+        Edge::North | Edge::South => egui::CursorIcon::ResizeVertical,
+        Edge::East | Edge::West => egui::CursorIcon::ResizeHorizontal,
+        Edge::NorthWest | Edge::SouthEast => egui::CursorIcon::ResizeNwSe,
+        Edge::NorthEast | Edge::SouthWest => egui::CursorIcon::ResizeNeSw,
+    });
+    if ctx.input(|i| i.pointer.primary_pressed()) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::BeginResize(edge));
     }
 }
 
@@ -2053,7 +2560,7 @@ fn paint_segment(painter: &egui::Painter, rect: Rect, segment: Segment, pal: &Pa
             {
                 let label = Rect::from_center_size(rect.center(), Vec2::new(40.0, rect.height() - 2.0));
                 painter.rect_filled(label, CornerRadius::ZERO, pal.bg);
-                painter.text(rect.center(), Align2::CENTER_CENTER, queue, FontId::monospace(10.5), pal.text);
+                painter.text(rect.center(), Align2::CENTER_CENTER, queue, FontId::proportional(10.5), pal.text);
             }
         }
     }
@@ -2114,47 +2621,89 @@ fn graph(ui: &mut egui::Ui, pal: &Palette, points: &[(f32, f32)], span: f32, flo
 
 /// Parameter row: name and value, as one line of a table. `bits` draws a binary
 /// encoding as boxes.
-fn value_row(
-    ui: &mut egui::Ui,
-    pal: &Palette,
-    name: &str,
+/// One row of a value table.
+struct Row<'a> {
+    name: &'a str,
     value: f32,
+    /// Used by the avatar (or nothing is known yet); unused rows are dimmed.
     active: bool,
-    bits: Option<&[bool]>,
+    /// Runs -1..1 instead of 0..1.
+    signed: bool,
+    bits: Option<&'a [bool]>,
+    /// Expandable row: `Some(open)` draws the chevron.
+    chevron: Option<bool>,
     highlight: bool,
-) -> egui::Response {
+}
+
+impl<'a> Row<'a> {
+    fn new(name: &'a str, value: f32) -> Self {
+        Self { name, value, active: true, signed: false, bits: None, chevron: None, highlight: false }
+    }
+}
+
+fn value_row(ui: &mut egui::Ui, pal: &Palette, row: Row<'_>) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
     let painter = ui.painter_at(rect);
-    paint_value_row(&painter, rect, pal, name, value, active, bits, highlight || response.hovered());
+    paint_value_row(&painter, rect, pal, &row, row.highlight || response.hovered());
     response
 }
 
-#[allow(clippy::too_many_arguments)]
-fn paint_value_row(
-    painter: &egui::Painter,
-    rect: Rect,
-    pal: &Palette,
-    name: &str,
-    value: f32,
-    active: bool,
-    bits: Option<&[bool]>,
-    highlight: bool,
-) {
-    if highlight {
-        painter.rect_filled(rect, CornerRadius::ZERO, pal.line.gamma_multiply(0.45));
+/// Rows are inset a little so the meters and highlights read as rounded bars.
+fn row_inset(rect: Rect) -> Rect {
+    rect.shrink2(Vec2::new(2.0, 1.0))
+}
+
+/// The value as a thin bar under the row text: from the left for 0..1, from the middle for -1..1.
+fn paint_meter(painter: &egui::Painter, rect: Rect, pal: &Palette, value: f32, signed: bool, active: bool) {
+    let track = Rect::from_min_max(
+        Pos2::new(rect.left() + 12.0, rect.bottom() - 6.0),
+        Pos2::new(rect.right() - 12.0, rect.bottom() - 3.0),
+    );
+    let radius = CornerRadius::same(2);
+    painter.rect_filled(track, radius, pal.line.gamma_multiply(0.45));
+    let v = value.clamp(-1.0, 1.0);
+    let (from, to) = if signed {
+        let middle = track.center().x;
+        let end = middle + v * track.width() / 2.0;
+        (middle.min(end), middle.max(end))
+    } else {
+        (track.left(), track.left() + v.max(0.0) * track.width())
+    };
+    if to - from >= 1.0 {
+        let bar = Rect::from_min_max(Pos2::new(from, track.top()), Pos2::new(to, track.bottom()));
+        painter.rect_filled(bar, radius, if active { pal.accent } else { pal.dim });
     }
-    let color = if active { pal.text } else { pal.dim };
-    let reserved = 64.0 + bits.map_or(0.0, |b| b.len() as f32 * 11.0 + 4.0);
-    let galley = truncated(painter, name.to_string(), FontId::monospace(12.5), color, rect.width() - reserved);
-    painter.galley(rect.left_center() + Vec2::new(10.0, -galley.size().y / 2.0), galley, color);
-    let mut right = rect.right() - 10.0;
-    if let Some(bits) = bits {
+    if signed {
+        // Marks the zero point.
+        let middle = track.center().x;
+        painter.vline(middle, track.y_range().expand(1.5), Stroke::new(1.0, pal.dim));
+    }
+}
+
+fn paint_value_row(painter: &egui::Painter, rect: Rect, pal: &Palette, row: &Row<'_>, highlight: bool) {
+    if highlight {
+        painter.rect_filled(row_inset(rect), CornerRadius::same(5), pal.line.gamma_multiply(0.5));
+    }
+    paint_meter(painter, rect, pal, row.value, row.signed, row.active);
+    let color = if row.active { pal.text } else { pal.dim };
+    let reserved = 70.0 + row.bits.map_or(0.0, |b| b.len() as f32 * 11.0 + 4.0) + row.chevron.map_or(0.0, |_| 16.0);
+    let mut left = rect.left() + 12.0;
+    if let Some(open) = row.chevron {
+        let glyph = if open { Glyph::ChevronDown } else { Glyph::ChevronRight };
+        let area = Rect::from_center_size(Pos2::new(left + 5.0, rect.center().y), Vec2::splat(12.0));
+        icons::paint(painter, glyph, area, pal.dim);
+        left += 16.0;
+    }
+    let galley = truncated(painter, row.name.to_string(), FontId::proportional(13.0), color, rect.width() - reserved);
+    painter.galley(Pos2::new(left, rect.center().y - galley.size().y / 2.0), galley, color);
+    let mut right = rect.right() - 12.0;
+    if let Some(bits) = row.bits {
         for &on in bits.iter().rev() {
             let b = Rect::from_center_size(Pos2::new(right - 4.0, rect.center().y), Vec2::splat(8.0));
             if on {
-                painter.rect_filled(b, CornerRadius::ZERO, pal.text);
+                painter.rect_filled(b, CornerRadius::same(2), pal.text);
             } else {
-                painter.rect_stroke(b, CornerRadius::ZERO, Stroke::new(1.0, pal.dim), StrokeKind::Inside);
+                painter.rect_stroke(b, CornerRadius::same(2), Stroke::new(1.0, pal.dim), StrokeKind::Inside);
             }
             right -= 11.0;
         }
@@ -2163,11 +2712,10 @@ fn paint_value_row(
     painter.text(
         Pos2::new(right, rect.center().y),
         Align2::RIGHT_CENTER,
-        percent(value),
-        FontId::monospace(11.5),
-        pal.dim,
+        percent(row.value),
+        FontId::proportional(12.5),
+        color,
     );
-    row_separator(painter, rect, pal);
 }
 
 /// One synced bool of a binary parameter, shown under its parameter: the parameter
@@ -2176,26 +2724,42 @@ fn bit_row(ui: &mut egui::Ui, pal: &Palette, address: &str, on: bool) {
     let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::hover());
     let painter = ui.painter_at(rect);
     let name = address.rsplit('/').next().unwrap_or(address).to_string();
-    let galley = truncated(&painter, name, FontId::monospace(12.0), pal.dim, rect.width() - 80.0);
-    painter.galley(rect.left_center() + Vec2::new(26.0, -galley.size().y / 2.0), galley, pal.dim);
-    let (text, color) = if on { ("ON", pal.text) } else { ("OFF", pal.dim) };
+    let galley = truncated(&painter, name, FontId::proportional(12.5), pal.dim, rect.width() - 90.0);
+    painter.galley(rect.left_center() + Vec2::new(30.0, -galley.size().y / 2.0), galley, pal.dim);
+    let (text, color) = if on { ("ON", pal.ok) } else { ("OFF", pal.dim) };
     painter.text(
-        rect.right_center() - Vec2::new(10.0, 0.0),
+        rect.right_center() - Vec2::new(12.0, 0.0),
         Align2::RIGHT_CENTER,
         text,
-        FontId::monospace(11.5),
+        FontId::new(11.5, widgets::semibold()),
         color,
     );
-    row_separator(&painter, rect, pal);
 }
 
-/// Thin line under a table row.
-fn row_separator(painter: &egui::Painter, rect: Rect, pal: &Palette) {
-    let y = rect.bottom() - 0.5;
-    painter.hline(rect.x_range(), y, Stroke::new(1.0, pal.line.gamma_multiply(0.6)));
+/// Color and words for the tracking state, shared by the status pill and the tray menu.
+pub fn status_line(pal: &Palette, language: Language, ft_output: bool, status: &Status, fps: f32) -> (Color32, String) {
+    if !ft_output {
+        return (pal.warn, tr(language, "paused").to_string());
+    }
+    match status {
+        Status::Running => (pal.ok, format!("{} · {:.0} FPS", tr(language, "tracking"), fps)),
+        Status::Starting => (pal.dim, tr(language, "starting").to_string()),
+        Status::NoFace => (pal.warn, tr(language, "no_face").to_string()),
+        Status::CameraError(_) => (pal.err, tr(language, "camera_error").to_string()),
+        Status::ModelError(_) => (pal.err, tr(language, "model_error").to_string()),
+    }
 }
 
 impl eframe::App for App {
+    /// Also runs while the window is hidden in the tray: keeps the tray icon's dot current.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let Some(tray) = &mut self.tray else { return };
+        tray.refresh(&self.pal, self.mark.as_ref().map(|m| m.id()));
+        if !tray.window_visible() {
+            ctx.request_repaint_after(Duration::from_secs(1));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let draw_started = Instant::now();
         let ctx = ui.ctx().clone();
@@ -2206,8 +2770,8 @@ impl eframe::App for App {
         let before = s.clone();
 
         if let Some(tray) = &mut self.tray {
-            tray.set_language(s.language);
-            tray.set_paused(!s.ft_output);
+            // Before any early return: the menu window must be declared in every pass.
+            tray.declare_menu(&ctx);
             if s.close_to_tray && ctx.input(|i| i.viewport().close_requested()) && !tray.quitting() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 tray.hide_window();
@@ -2220,7 +2784,7 @@ impl eframe::App for App {
         }
 
         if self.font_language != s.language {
-            load_cjk_fonts(&ctx, s.language);
+            load_fonts(&ctx, s.language);
             self.font_language = s.language;
         }
 
@@ -2256,32 +2820,69 @@ impl eframe::App for App {
         let new_preview = self.update_texture(&ctx, &snapshot);
         self.hover = self.hover_now.take();
         self.prev_rows = std::mem::take(&mut self.rows);
+        if self.dwell.0 != self.hover {
+            self.dwell = (self.hover, Instant::now());
+            self.revealed = [false; 3];
+        }
+        if self.hover.is_some() && self.dwell.1.elapsed() < REVEAL_AFTER {
+            ctx.request_repaint_after(REVEAL_AFTER);
+        }
 
+        // Too narrow for a sidebar: the camera and calibration move to the top of the content.
+        let compact = ui.available_width() < 760.0;
         let bar = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 10));
-        egui::Panel::top("top").frame(bar).show(ui, |ui| self.top_bar(ui, &mut s));
-        if self.settings_open {
-            let frame = Frame::new()
-                .fill(self.pal.panel)
-                .stroke(Stroke::new(1.0, self.pal.line))
-                .inner_margin(Margin::same(14));
-            egui::Panel::right("settings")
-                .exact_size(360.0)
+        let top = egui::Panel::top("top").frame(bar).show(ui, |ui| self.top_bar(ui, &mut s, &snapshot));
+        let edge = top.response.rect;
+        ui.painter().hline(edge.x_range(), edge.bottom() - 0.5, Stroke::new(1.0, self.pal.line));
+        self.window_edges(&ctx);
+        let advanced = s.advanced;
+        if !compact && advanced {
+            let frame = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 14));
+            egui::Panel::left("sidebar")
+                .exact_size(SIDEBAR_WIDTH)
                 .resizable(false)
                 .frame(frame)
-                .show(ui, |ui| self.settings_panel(ui, &mut s, &snapshot));
-        }
-        let body = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 4));
-        egui::CentralPanel::default().frame(body).show(ui, |ui| {
-            self.preview(ui, &s, &snapshot);
+                .show(ui, |ui| self.sidebar(ui, &mut s, &snapshot));
             if let Some(times) = new_frame
                 && new_preview
             {
                 let breakdown = perf::interface_breakdown(&times, draw_started, Instant::now());
                 self.shared.perf.lock().record_path(Path::Preview, breakdown);
             }
-            ui.add_space(10.0);
-            self.toolbar(ui, &mut s);
-            ui.add_space(10.0);
+        }
+        let body = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 14));
+        egui::CentralPanel::default().frame(body).show(ui, |ui| {
+            if !advanced {
+                self.simple_view(ui, &mut s, &snapshot, compact);
+                if let Some(times) = new_frame
+                    && new_preview
+                {
+                    let breakdown = perf::interface_breakdown(&times, draw_started, Instant::now());
+                    self.shared.perf.lock().record_path(Path::Preview, breakdown);
+                }
+                return;
+            }
+            if compact {
+                let title = format!("{} · {}", self.t(&s, "camera"), self.t(&s, "calibrate"));
+                let title = widgets::title(&self.pal, &title);
+                egui::CollapsingHeader::new(title).default_open(false).show(ui, |ui| {
+                    // The two cards side by side, as wide as the sidebar would make them.
+                    let width = ((ui.available_width() - 12.0) / 2.0).floor();
+                    ui.horizontal_top(|ui| {
+                        ui.spacing_mut().item_spacing.x = 12.0;
+                        let column = Layout::top_down(Align::Min);
+                        ui.allocate_ui_with_layout(Vec2::new(width, 0.0), column, |ui| {
+                            self.camera_card(ui, &mut s, &snapshot, false);
+                        });
+                        ui.allocate_ui_with_layout(Vec2::new(width, 0.0), column, |ui| {
+                            self.calibration_card(ui, &mut s, &snapshot);
+                        });
+                    });
+                });
+                ui.add_space(8.0);
+            }
+            self.tools_row(ui, &mut s, &snapshot);
+            ui.add_space(12.0);
 
             let height = (ui.available_height() - 4.0).max(120.0);
             let width = ui.available_width();
@@ -2322,6 +2923,23 @@ impl eframe::App for App {
                 perf.record_path(Path::Tables, perf::interface_breakdown(&times, draw_started, Instant::now()));
             }
         });
+        if self.settings_open {
+            let frame = Frame::new()
+                .fill(self.pal.panel)
+                .stroke(Stroke::new(1.0, self.pal.line))
+                .corner_radius(CornerRadius::same(widgets::RADIUS + 6))
+                .inner_margin(Margin::same(20));
+            let modal = egui::Modal::new(ui.make_persistent_id("settings_modal"))
+                .frame(frame)
+                .backdrop_color(Color32::from_black_alpha(150))
+                .show(&ctx, |ui| {
+                    ui.set_width(460.0);
+                    self.settings_panel(ui, &mut s, &snapshot);
+                });
+            if modal.should_close() {
+                self.settings_open = false;
+            }
+        }
         if self.hover_now != self.hover {
             // Highlights follow the previous frame's hover; draw once more to catch up.
             ctx.request_repaint();

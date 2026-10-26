@@ -90,23 +90,45 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
 - Panel headers go through `header()`: title on the left (truncated), controls on the
   right, added right-to-left. Never let a right-to-left row overflow: it pushes the whole
   panel off the left edge. `header()` wraps the controls instead.
-- Panel style: dashed outlines (`dashed_rect`), table rows with
-  separators and no spacing between them, MediaPipe groups in dashed boxes.
+- Layout: top bar (status pill from `status_line`, Pause / Resume, Simple / Advanced switch
+  (`Settings::advanced`), theme, settings, language; title, Pause label and links hidden below 940 pt). Simple (`simple_view`): the
+  camera card as tall as the window allows next to the calibrate card. Advanced: a 340 pt sidebar with the
+  same cards, `tools_row` (search, switches and processing options for all tables, so panel headers carry no controls; its two
+  groups stack below 900 pt)
+  and the three panels. Below 760 pt of window width (large interface scales) the cards stack, in a
+  collapsible block above the panels in Advanced. The settings are an `egui::Modal` split into sections
+  (`section`); its scroll area needs `min_scrolled_height` or the modal shrinks to half the window.
+- The window is undecorated (`with_decorations(false)`): `top_bar` drags it (`StartDrag`), maximizes on
+  double click and draws minimize / maximize / close (`window_button`). With no frame, `window_edges` turns
+  the outer `RESIZE_BAND` points into resize handles (`BeginResize`) and raises a restored size below
+  `MIN_WINDOW` once; the drag in `top_bar` ignores presses in that band. Close goes through the
+  normal close request, so close-to-tray still applies.
+- Controls come from `widgets.rs` (`button`, `icon_button`, `chip`, `pill`, `card`); icons are
+  drawn by `icons.rs` on a 24 x 24 grid. Do not put glyph characters (arrows, check marks, emoji)
+  in UI text: Segoe UI lacks them and they show as boxes. Add a `Glyph` instead.
+- Fonts: `load_fonts` puts Segoe UI first (and its semibold as the `semibold` family) for
+  non-CJK languages; Japanese, Korean and Chinese put their own CJK font first. A language's own
+  name uses `native_font` so its text stays in one font.
+- Panel style: rounded cards (`panel_frame`), 30 px rows with a 3 px value bar under the name
+  (`paint_meter`) and no separators, MediaPipe groups set apart by a gap.
 - Panel links: each frame records row rects in `Rows` and the hovered row in
   `hover_now`; highlights use the previous frame's `hover`, and `draw_links` paints the
-  lines after the three panels. When a hovered channel's expressions are not all in
-  view, `pull_related` moves them into one block in the list next to the channel. The
-  decision is kept while that channel stays hovered (`pulled`), otherwise it flickers.
+  lines after the three panels. Rows are never moved: when the hovered row has been
+  hovered for `REVEAL_AFTER`, `reveal` scrolls the first linked row that is out of view in
+  another panel to the centre, once per hovered row (`revealed`, so it does not oscillate
+  between several linked rows), and `draw_links` marks rows still out of view with an arrow.
 - The MediaPipe panel is drawn first, so `hover_now` already holds a hovered channel
   when the Unified Expressions list is laid out.
 - Use `min().max()` rather than `f32::clamp` with bounds taken from layout rects; empty
   rects (min > max) make `clamp` panic.
 - `tray.rs` (Windows only, `tray-icon`): closing the window is cancelled and the window hidden
   with Win32 `ShowWindow`; the tray handlers show it again the same way, because a hidden window
-  may not run the egui loop. Quit sets `quitting` so the close goes through. The Pause check item toggles
-  `Settings::ft_output` and saves it in the handler (the UI may not be running); the UI mirrors
-  the setting back into the check mark. `Settings::close_to_tray` decides whether close is cancelled. While hidden,
-  `ui` returns early with `ui_awake` false.
+  may not run the egui loop. Quit sets `quitting` so the close goes through. The right-click menu is a
+  deferred egui viewport (title "VRC Openface menu", declared by `declare_menu` in every `ui` pass or egui
+  drops it); the tray click handler positions and shows it with Win32 (`open_at`), and it hides itself on
+  focus loss or Escape. Its Pause row toggles `Settings::ft_output` and saves it (the UI may not be running).
+  eframe runs no `ui` while the main window is hidden, only `App::logic`, which is where `Tray::refresh`
+  updates the icon's status dot and tooltip. `Settings::close_to_tray` decides whether close is cancelled.
 - The window icon is `assets/icon.png`; `build.rs` embeds `assets/icon.ico` in the exe
   with `winresource`.
 

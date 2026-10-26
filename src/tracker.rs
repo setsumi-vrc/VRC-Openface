@@ -220,7 +220,8 @@ fn device_label(gpu: Option<i32>, gpus: &[GpuAdapter]) -> String {
     }
 }
 
-/// Imported tongue model first, then the bundled models folder.
+/// Imported tongue model first, then the models folder. Without either, a build that
+/// compiled one in uses that.
 pub fn tongue_path(model_dir: &Path) -> Option<PathBuf> {
     [config::user_model_dir().join(TONGUE_FILE), model_dir.join(TONGUE_FILE)].into_iter().find(|p| p.is_file())
 }
@@ -401,16 +402,24 @@ impl Tracker {
         }
         self.tongue = None;
         self.tongue_gpu = Some(gpu);
-        let Some(path) = tongue_path(&self.model_dir) else {
+        let path = tongue_path(&self.model_dir);
+        let load = |gpu: Option<i32>| match &path {
+            Some(path) => TongueModel::load(path, gpu),
+            #[cfg(embedded_tongue)]
+            None => TongueModel::load_embedded(gpu),
+            #[cfg(not(embedded_tongue))]
+            None => unreachable!("checked below"),
+        };
+        if path.is_none() && !cfg!(embedded_tongue) {
             self.tongue_status = TongueStatus::Missing;
             return;
-        };
-        let loaded = TongueModel::load(&path, gpu).map(|m| (m, gpu)).or_else(|e| {
+        }
+        let loaded = load(gpu).map(|m| (m, gpu)).or_else(|e| {
             if gpu.is_none() {
                 return Err(e);
             }
             log::warn!("GPU tongue inference unavailable, using CPU: {e:#}");
-            TongueModel::load(&path, None).map(|m| (m, None))
+            load(None).map(|m| (m, None))
         });
         match loaded {
             Ok((model, used)) => {

@@ -37,6 +37,8 @@ pub struct Settings {
     pub cat_ears: bool,
     pub tongue: bool,
     pub show_unused: bool,
+    /// The full view with the channel tables; off shows the simple one.
+    pub advanced: bool,
     pub camera_blur: bool,
     pub debug: bool,
     pub idle_sleep: bool,
@@ -73,6 +75,7 @@ impl Default for Settings {
             cat_ears: false,
             tongue: true,
             show_unused: true,
+            advanced: false,
             camera_blur: true,
             debug: false,
             idle_sleep: true,

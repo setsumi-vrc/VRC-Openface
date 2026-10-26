@@ -46,8 +46,10 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: viewport
             .with_title("VRC Openface")
+            // The top bar draws its own window controls.
+            .with_decorations(false)
             .with_inner_size([1480.0, 940.0])
-            .with_min_inner_size([960.0, 640.0]),
+            .with_min_inner_size([app::MIN_WINDOW.x, app::MIN_WINDOW.y]),
         // Window state lives with the rest of the app data, so `VRC_OPENFACE_DATA` test
         // runs keep their own and "Erase all app data" removes it too.
         persistence_path: Some(vrc_openface::config::data_dir().join("window")),

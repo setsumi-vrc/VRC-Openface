@@ -49,10 +49,16 @@ impl Default for CustomColors {
 pub struct Palette {
     pub bg: Color32,
     pub panel: Color32,
+    /// Controls resting on a panel: buttons, fields, chips.
+    pub raised: Color32,
     pub text: Color32,
     pub dim: Color32,
     pub line: Color32,
     pub accent: Color32,
+    /// Status colors: tracking works, something to look at, something is wrong.
+    pub ok: Color32,
+    pub warn: Color32,
+    pub err: Color32,
     /// Text drawn on an accent-filled button.
     pub on_accent: Color32,
     pub dark: bool,
@@ -62,7 +68,7 @@ fn rgb(c: [u8; 3]) -> Color32 {
     Color32::from_rgb(c[0], c[1], c[2])
 }
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
@@ -72,19 +78,31 @@ fn luminance(c: Color32) -> f32 {
 }
 
 fn build(bg: Color32, panel: Color32, text: Color32, accent: Color32) -> Palette {
+    let dark = luminance(bg) < 0.5;
+    // Status colors keep their meaning in every scheme; on light backgrounds they are darkened to stay readable.
+    let status = |c: Color32| if dark { c } else { mix(c, Color32::BLACK, 0.35) };
     Palette {
         bg,
         panel,
+        raised: mix(panel, text, 0.07),
         text,
         dim: mix(text, bg, 0.55),
         line: mix(text, bg, 0.78),
         accent,
+        ok: status(Color32::from_rgb(98, 204, 140)),
+        warn: status(Color32::from_rgb(240, 186, 72)),
+        err: status(Color32::from_rgb(240, 104, 104)),
         on_accent: if luminance(accent) > 0.55 { Color32::BLACK } else { Color32::WHITE },
-        dark: luminance(bg) < 0.5,
+        dark,
     }
 }
 
 impl Palette {
+    /// Fill of a control under the pointer: the resting fill moved toward the text color.
+    pub fn hover(&self) -> Color32 {
+        mix(self.raised, self.text, if self.dark { 0.12 } else { 0.10 })
+    }
+
     pub fn of(scheme: Scheme, custom: &CustomColors) -> Palette {
         let c = Color32::from_rgb;
         match scheme {

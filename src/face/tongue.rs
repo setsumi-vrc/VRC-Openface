@@ -1,7 +1,8 @@
 //! Optional tongue tracking: an ONNX model reads a square crop of the mouth and returns the
 //! six tongue channels.
 //!
-//! No tongue model ships with this repository. A compatible model takes `[1, C, S, S]` floats:
+//! No tongue model ships with this repository; a build can compile one in (see `build.rs`).
+//! A compatible model takes `[1, C, S, S]` floats:
 //! C = 1 (luma) or 3 (RGB) planes in [0, 1] of a crop S pixels wide, S read from the model
 //! ([`OPEN_SIZE`] when the model leaves it open). It returns the six values of
 //! [`TONGUE_CHANNELS`], in that order, in [0, 1].
@@ -15,6 +16,8 @@ use anyhow::{Context, Result, bail, ensure};
 use ort::session::Session;
 use ort::value::Tensor;
 
+#[cfg(embedded_tongue)]
+use super::create_session_from_memory;
 use super::{FaceRect, create_session, crop_tensor};
 use crate::image::RgbFrame;
 
@@ -97,6 +100,13 @@ impl TongueModel {
 
     pub fn load(path: &Path, gpu_device: Option<i32>) -> Result<Self> {
         Self::new(create_session(path, gpu_device)?)
+    }
+
+    /// The model compiled into the executable, if this build has one.
+    #[cfg(embedded_tongue)]
+    pub fn load_embedded(gpu_device: Option<i32>) -> Result<Self> {
+        const BYTES: &[u8] = include_bytes!("../../models/tongue_model.onnx");
+        Self::new(create_session_from_memory(BYTES, gpu_device)?)
     }
 
     /// Side of the square crop the model takes.
