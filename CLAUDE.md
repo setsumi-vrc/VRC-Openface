@@ -101,6 +101,10 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
   when the Unified Expressions list is laid out.
 - Use `min().max()` rather than `f32::clamp` with bounds taken from layout rects; empty
   rects (min > max) make `clamp` panic.
+- `tray.rs` (Windows only, `tray-icon`): closing the window is cancelled and the window hidden
+  with Win32 `ShowWindow`; the tray handlers show it again the same way, because a hidden window
+  may not run the egui loop. Quit sets `quitting` so the close goes through. While hidden,
+  `ui` returns early with `ui_awake` false.
 - The window icon is `assets/icon.png`; `build.rs` embeds `assets/icon.ico` in the exe
   with `winresource`.
 

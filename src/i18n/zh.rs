@@ -149,4 +149,6 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_upload", "预览上传"),
     ("st_tables", "表格"),
     ("st_draw", "绘制"),
+    ("tray_open", "打开"),
+    ("tray_quit", "退出"),
 ];

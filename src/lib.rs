@@ -17,4 +17,5 @@ pub mod processing;
 pub mod system;
 pub mod theme;
 pub mod tracker;
+pub mod tray;
 pub mod updater;

@@ -350,6 +350,8 @@ const TEXT: &[(&str, &str, &str, &str)] = &[
     ("st_upload", "Preview upload", "プレビュー転送", "미리보기 업로드"),
     ("st_tables", "Tables", "表", "표"),
     ("st_draw", "Draw", "描画", "그리기"),
+    ("tray_open", "Open", "開く", "열기"),
+    ("tray_quit", "Quit", "終了", "종료"),
 ];
 
 pub fn tr(language: Language, key: &str) -> &'static str {

@@ -170,4 +170,6 @@ pub const TEXT: &[(&str, &str)] = &[
     ("st_upload", "Vorschau hochladen"),
     ("st_tables", "Tabellen"),
     ("st_draw", "Zeichnen"),
+    ("tray_open", "Öffnen"),
+    ("tray_quit", "Beenden"),
 ];

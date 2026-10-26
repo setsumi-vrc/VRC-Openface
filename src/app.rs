@@ -135,6 +135,8 @@ pub struct App {
     seen_frame: u64,
     /// Language the CJK font order was built for.
     font_language: Language,
+    /// Tray icon; closing the window hides it there instead of quitting.
+    tray: Option<crate::tray::Tray>,
 }
 
 /// Flag images by language code (drawn by `tools/make_flags.py`).
@@ -337,6 +339,7 @@ impl App {
             narrow: false,
             seen_frame: 0,
             font_language: language,
+            tray: crate::tray::Tray::new(cc, language),
         }
     }
 
@@ -2198,6 +2201,19 @@ impl eframe::App for App {
         }
         let mut s = self.shared.settings.read().clone();
         let before = s.clone();
+
+        if let Some(tray) = &mut self.tray {
+            tray.set_language(s.language);
+            if ctx.input(|i| i.viewport().close_requested()) && !tray.quitting() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                tray.hide_window();
+            }
+            if !tray.window_visible() {
+                // Nothing to draw; tracking and OSC go on without the interface.
+                self.shared.ui_awake.store(false, Ordering::Relaxed);
+                return;
+            }
+        }
 
         if self.font_language != s.language {
             load_cjk_fonts(&ctx, s.language);
