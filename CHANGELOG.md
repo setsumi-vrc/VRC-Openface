@@ -12,6 +12,8 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-26
+
 ### Fixed
 - Cleaning up after an update no longer deletes every `*.old` file below the folder the app runs from (in Downloads or on the Desktop that could take files of your own): only the files the update replaced, in the app folder and `models/`.
 - The beta channel offers the final release of a version it has a pre-release of (0.7.0 after 0.7.0-beta.1); pre-releases were ranked above their release.
