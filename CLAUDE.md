@@ -14,6 +14,8 @@ cargo run --release --example still_image -- face.jpg       # pipeline on a stil
 cargo run --release --example camera_check -- 0 640 480 30  # camera mode + measured FPS
 uv run tools/convert_models.py                # regenerate models/*.onnx from Google's .task
 uv run tools/make_icons.py                    # regenerate assets/icon.png and icon.ico
+cargo run --release --example tongue_check      # camera: tongue values and the mouth crop the model sees
+cargo run --release --example tongue_device     # tongue model, CPU against DirectML on a synthetic input
 uv run tools/make_link_icons.py               # regenerate assets/github.png and x.png (top bar links)
 uv run tools/make_flags.py                    # regenerate assets/flags/*.png (language menu)
 ```
@@ -71,6 +73,7 @@ image (mean blendshape difference ≈ 0.01 when this was written).
   global or per channel) → per-avatar `ChannelCalibration` (min/max remap or override;
   L/R linked unless listed in `unlinked`) → symmetry → gaze minus `gaze_center`.
   Neutral capture averages 45 frames, sets each channel's `min` and keeps an undo copy.
+- Profiles (`CalibrationStore::profiles`, `Profile`): a named copy of one avatar's `AvatarCalibration` plus the `ProcessingSettings`; loading replaces both for the current avatar.
 - `mapping.rs`: `OUTPUTS` is the single source of truth (VRCFT name, friendly name,
   input channels, formula, signed, cat ears). The order of `inputs` is the order the
   formula receives values, and dependencies for the UI come from the same list.
@@ -92,9 +95,8 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
   panel off the left edge. `header()` wraps the controls instead.
 - Layout: top bar (status pill from `status_line`, Pause / Resume, Simple / Advanced switch
   (`Settings::advanced`), theme, settings, language; title, Pause label and links hidden below 940 pt). Simple (`simple_view`): the
-  camera card as tall as the window allows next to the calibrate card. Advanced: a 340 pt sidebar with the
-  same cards, `tools_row` (search, switches and processing options for all tables, so panel headers carry no controls; its two
-  groups stack below 900 pt)
+  camera card as tall as the window allows next to the calibrate card (with profiles, `profiles_block`) and, under it, the MediaPipe panel (`mediapipe_panel(.., simple = true)`: own search, every parameter). Advanced: a strip across the top (`camera_strip`: calibration with profiles on the left, then the camera centered in the space left: controls up to `CAMERA_CONTROLS_MAX` wide next to a preview of the frame's shape), `tools_row` (search, switches and processing options for all tables, so panel headers carry no controls; its two
+  groups stack below 1140 pt)
   and the three panels. Below 760 pt of window width (large interface scales) the cards stack, in a
   collapsible block above the panels in Advanced. The settings are an `egui::Modal` split into sections
   (`section`); its scroll area needs `min_scrolled_height` or the modal shrinks to half the window.

@@ -149,6 +149,13 @@ impl TongueModel {
     }
 }
 
+/// The crop a tongue model sees, `size` pixels wide, as an image to check the alignment.
+pub fn mouth_crop(frame: &RgbFrame, pixel_landmarks: &[[f32; 3]], size: usize) -> Option<RgbFrame> {
+    let mouth = Mouth::find(pixel_landmarks)?;
+    let rgb = crop_tensor(frame, mouth.rect, size, false);
+    Some(RgbFrame::new(size, size, rgb.iter().map(|v| (v * 255.0).round() as u8).collect()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

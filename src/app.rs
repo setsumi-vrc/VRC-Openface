@@ -19,7 +19,7 @@ use crate::icons::{self, Glyph};
 use crate::mapping::{Mapper, OUTPUTS};
 use crate::osc::Binding;
 use crate::perf::{self, Group, Path, Segment, Stage};
-use crate::processing::{self, ChannelCalibration, Source};
+use crate::processing::{self, AvatarCalibration, ChannelCalibration, Profile, Source};
 use crate::theme::{CustomColors, Palette, Scheme, mix};
 use crate::tracker::{self, Command, Shared, Snapshot, Status, TongueStatus};
 use crate::updater::{self, Channel, Release};
@@ -29,9 +29,15 @@ const RESOLUTIONS: [(u32, u32); 4] = [(640, 480), (848, 480), (1280, 720), (1920
 const SCALES: [f32; 6] = [0.75, 0.9, 1.0, 1.1, 1.25, 1.5];
 const MAPPING_DOCS: &str = "https://docs.vrcft.io/docs/tutorial-avatars/tutorial-avatars-extras/parameters";
 const ROW_HEIGHT: f32 = 30.0;
-const SIDEBAR_WIDTH: f32 = 340.0;
+const SIDEBAR_WIDTH: f32 = 460.0;
+/// Height of the preview in the camera strip across the top of the Advanced view.
+const STRIP_PREVIEW: f32 = 230.0;
+/// Width of the calibration card in the strip.
+const CALIBRATION_WIDTH: f32 = 400.0;
+/// The most the camera controls in the strip grow to.
+const CAMERA_CONTROLS_MAX: f32 = 360.0;
 /// Smallest window the layout holds together in.
-pub const MIN_WINDOW: Vec2 = Vec2::new(1060.0, 660.0);
+pub const MIN_WINDOW: Vec2 = Vec2::new(1220.0, 660.0);
 /// Width of the strip along the window edge that starts a resize (the window has no frame).
 const RESIZE_BAND: f32 = 5.0;
 /// How long a row stays hovered before the rows linked to it scroll into view.
@@ -124,6 +130,19 @@ pub struct App {
     search: String,
     settings_open: bool,
     expanded: Option<usize>,
+    /// The profile last loaded or saved, and the name typed for the next save.
+    /// The MediaPipe list's filters: a group of [`channels::CATEGORIES`] (0 is all) and only
+    /// the parameters changed from their defaults.
+    filter_group: usize,
+    filter_modified: bool,
+    profile_active: Option<String>,
+    profile_name: String,
+    /// Delete was pressed and waits for a yes or a no.
+    profile_confirm: bool,
+    /// The same for Reset all.
+    reset_confirm: bool,
+    /// What "modified" is measured against: the saved profile in use, or the defaults.
+    baseline: Profile,
     expanded_bindings: BTreeSet<usize>,
     mapper: Mapper,
     pal: Palette,
@@ -266,6 +285,8 @@ fn apply_style(ctx: &egui::Context, pal: &Palette) {
         ] {
             style.text_styles.insert(text_style, font);
         }
+        // Labels are text on a control surface, not something to select and copy.
+        style.interaction.selectable_labels = false;
         let mut v = if pal.dark { egui::Visuals::dark() } else { egui::Visuals::light() };
         v.panel_fill = pal.bg;
         v.window_fill = pal.panel;
@@ -373,7 +394,7 @@ fn ms_since(started: Instant) -> f32 {
 }
 
 fn mib(bytes: u64) -> String {
-    format!("{:.0} MB", bytes as f64 / (1024.0 * 1024.0))
+    format!("{:.3} MB", bytes as f64 / (1024.0 * 1024.0))
 }
 
 impl App {
@@ -408,6 +429,13 @@ impl App {
             search: String::new(),
             settings_open: false,
             expanded: None,
+            filter_group: 0,
+            filter_modified: false,
+            profile_active: None,
+            profile_name: String::new(),
+            profile_confirm: false,
+            reset_confirm: false,
+            baseline: Profile::default(),
             expanded_bindings: BTreeSet::new(),
             mapper: Mapper::new(),
             pal,
@@ -533,27 +561,49 @@ impl App {
             }
             if s.scheme == Scheme::Custom {
                 ui.add_space(6.0);
+                // The picker opens inside this menu: a popup of its own would count as a click outside
+                // it, and the menu would close with the picker.
+                let open_id = egui::Id::unique("custom-color-open");
+                let mut open: Option<usize> = ui.data(|d| d.get_temp(open_id)).flatten();
                 let outline = Stroke::new(1.0, self.pal.dim);
+                let c = &mut s.custom_colors;
                 egui::Grid::new("custom-colors").num_columns(2).spacing([16.0, 6.0]).show(ui, |ui| {
-                    let c = &mut s.custom_colors;
-                    for (key, color) in [
-                        ("theme_background", &mut c.background),
-                        ("theme_panel", &mut c.panel),
-                        ("theme_text", &mut c.text),
-                        ("theme_accent", &mut c.accent),
-                    ] {
+                    for (i, (key, color)) in [
+                        ("theme_background", &c.background),
+                        ("theme_panel", &c.panel),
+                        ("theme_text", &c.text),
+                        ("theme_accent", &c.accent),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
                         ui.label(tr(language, key));
-                        let swatch = ui.color_edit_button_srgb(color);
-                        // Dark colours vanish against the menu without an outline.
-                        ui.painter().rect_stroke(
-                            swatch.rect,
-                            CornerRadius::same(widgets::RADIUS),
-                            outline,
-                            StrokeKind::Outside,
-                        );
+                        let (rect, response) = ui.allocate_exact_size(Vec2::new(44.0, 24.0), Sense::click());
+                        let radius = CornerRadius::same(widgets::RADIUS);
+                        ui.painter().rect_filled(rect, radius, Color32::from_rgb(color[0], color[1], color[2]));
+                        let edge = if open == Some(i) { Stroke::new(1.5, self.pal.accent) } else { outline };
+                        ui.painter().rect_stroke(rect, radius, edge, StrokeKind::Outside);
+                        if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                            open = if open == Some(i) { None } else { Some(i) };
+                        }
                         ui.end_row();
                     }
                 });
+                if let Some(i) = open {
+                    let color = match i {
+                        0 => &mut c.background,
+                        1 => &mut c.panel,
+                        2 => &mut c.text,
+                        _ => &mut c.accent,
+                    };
+                    ui.add_space(6.0);
+                    ui.spacing_mut().slider_width = 180.0;
+                    let mut picked = Color32::from_rgb(color[0], color[1], color[2]);
+                    if egui::color_picker::color_picker_color32(ui, &mut picked, egui::color_picker::Alpha::Opaque) {
+                        *color = [picked.r(), picked.g(), picked.b()];
+                    }
+                }
+                ui.data_mut(|d| d.insert_temp(open_id, open));
             }
         });
     }
@@ -776,6 +826,7 @@ impl App {
             let tight = ui.available_width() < 940.0;
             if !tight {
                 ui.label(RichText::new("VRC Openface").font(FontId::new(16.0, widgets::semibold())));
+                ui.label(RichText::new(concat!("v", env!("CARGO_PKG_VERSION"))).size(11.0).color(pal.dim));
                 ui.add_space(12.0);
             }
             let (color, text) = self.status_line(s, snapshot);
@@ -837,89 +888,124 @@ impl App {
         });
     }
 
-    /// Camera and calibration: what you do first, and what you come back to.
-    fn sidebar(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
-        egui::ScrollArea::vertical().id_salt("sidebar").auto_shrink([false, false]).show(ui, |ui| {
-            ui.spacing_mut().item_spacing.y = 12.0;
-            self.camera_card(ui, s, snapshot, false);
-            self.calibration_card(ui, s, snapshot);
-        });
-    }
-
     fn camera_card(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot, large: bool) {
         let pal = self.pal;
         widgets::card(&pal).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                ui.label(widgets::title(&pal, self.t(s, "camera")));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let refresh = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Refresh), false);
-                    if refresh.on_hover_text(self.t(s, "refresh_cameras")).clicked() {
-                        self.cameras = camera::list();
-                    }
-                    let mirror = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Mirror), s.mirror);
-                    if mirror.on_hover_text(self.t(s, "mirror")).clicked() {
-                        s.mirror = !s.mirror;
-                    }
-                });
-            });
-            let selected = self
-                .cameras
-                .iter()
-                .find(|c| c.index == s.camera_index)
-                .map(|c| format!("{}: {}", c.index, c.name))
-                .unwrap_or_else(|| format!("{}: {}", s.camera_index, self.t(s, "camera")));
-            egui::ComboBox::from_id_salt("camera")
-                .width(ui.available_width())
-                .selected_text(selected)
-                .truncate()
-                .show_ui(ui, |ui| {
-                    for camera in &self.cameras {
-                        ui.selectable_value(
-                            &mut s.camera_index,
-                            camera.index,
-                            format!("{}: {}", camera.index, camera.name),
-                        );
-                    }
-                });
-            // Resolution and rate, so they do not need a trip to the settings.
-            ui.horizontal(|ui| {
-                let gap = ui.spacing().item_spacing.x;
-                let half = ((ui.available_width() - gap) / 2.0).max(80.0);
-                let current = format!("{}\u{00d7}{}", s.resolution.0, s.resolution.1);
-                let resolution = egui::ComboBox::from_id_salt("quick-resolution")
-                    .width(half)
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        for r in RESOLUTIONS {
-                            ui.selectable_value(&mut s.resolution, r, format!("{}\u{00d7}{}", r.0, r.1));
-                        }
-                    });
-                resolution.response.on_hover_text(self.t(s, "resolution"));
-                let fps = egui::ComboBox::from_id_salt("quick-fps")
-                    .width(half)
-                    .selected_text(format!("{} FPS", s.camera_fps))
-                    .show_ui(ui, |ui| {
-                        for rate in [30, 60] {
-                            ui.selectable_value(&mut s.camera_fps, rate, format!("{rate} FPS"));
-                        }
-                    });
-                fps.response.on_hover_text(self.t(s, "camera_fps"));
-            });
+            self.camera_controls(ui, s);
             // The large preview takes the height the window leaves, minus the chips below it.
             let tallest = if large { (ui.available_height() - 48.0).max(200.0) } else { 280.0 };
             self.preview(ui, s, snapshot, tallest);
-            ui.horizontal_wrapped(|ui| {
-                let (preview, landmarks) = (self.t(s, "camera_preview"), self.t(s, "face_landmarks"));
-                widgets::chip(ui, &pal, Glyph::Eye, preview, &mut s.show_camera);
-                widgets::chip(ui, &pal, Glyph::Face, landmarks, &mut s.show_landmarks);
-                let ears = format!("{}\n{}", self.t(s, "cat_ears"), self.t(s, "cat_ears_hint"));
-                widgets::chip(ui, &pal, Glyph::Ears, self.t(s, "cat_ears"), &mut s.cat_ears).on_hover_text(ears);
+            self.camera_chips(ui, s);
+        });
+    }
+
+    /// The camera's title row, device, resolution and rate.
+    fn camera_controls(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        let pal = self.pal;
+        ui.horizontal(|ui| {
+            ui.label(widgets::title(&pal, self.t(s, "camera")));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let refresh = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Refresh), false);
+                if refresh.on_hover_text(self.t(s, "refresh_cameras")).clicked() {
+                    self.cameras = camera::list();
+                }
+                let mirror = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Mirror), s.mirror);
+                if mirror.on_hover_text(self.t(s, "mirror")).clicked() {
+                    s.mirror = !s.mirror;
+                }
+            });
+        });
+        let selected = self
+            .cameras
+            .iter()
+            .find(|c| c.index == s.camera_index)
+            .map(|c| format!("{}: {}", c.index, c.name))
+            .unwrap_or_else(|| format!("{}: {}", s.camera_index, self.t(s, "camera")));
+        egui::ComboBox::from_id_salt("camera").width(ui.available_width()).selected_text(selected).truncate().show_ui(
+            ui,
+            |ui| {
+                for camera in &self.cameras {
+                    ui.selectable_value(
+                        &mut s.camera_index,
+                        camera.index,
+                        format!("{}: {}", camera.index, camera.name),
+                    );
+                }
+            },
+        );
+        // Resolution and rate, so they do not need a trip to the settings.
+        ui.horizontal(|ui| {
+            let gap = ui.spacing().item_spacing.x;
+            let half = ((ui.available_width() - gap) / 2.0).max(80.0);
+            let current = format!("{}\u{00d7}{}", s.resolution.0, s.resolution.1);
+            let resolution =
+                egui::ComboBox::from_id_salt("quick-resolution").width(half).selected_text(current).show_ui(ui, |ui| {
+                    for r in RESOLUTIONS {
+                        ui.selectable_value(&mut s.resolution, r, format!("{}\u{00d7}{}", r.0, r.1));
+                    }
+                });
+            resolution.response.on_hover_text(self.t(s, "resolution"));
+            let fps = egui::ComboBox::from_id_salt("quick-fps")
+                .width(half)
+                .selected_text(format!("{} FPS", s.camera_fps))
+                .show_ui(ui, |ui| {
+                    for rate in [30, 60] {
+                        ui.selectable_value(&mut s.camera_fps, rate, format!("{rate} FPS"));
+                    }
+                });
+            fps.response.on_hover_text(self.t(s, "camera_fps"));
+        });
+    }
+
+    /// Preview, landmarks, cat ears and (in the Simple view) tongue switches.
+    fn camera_chips(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
+        let pal = self.pal;
+        ui.horizontal_wrapped(|ui| {
+            let (preview, landmarks) = (self.t(s, "camera_preview"), self.t(s, "face_landmarks"));
+            widgets::chip(ui, &pal, Glyph::Eye, preview, &mut s.show_camera);
+            widgets::chip(ui, &pal, Glyph::Face, landmarks, &mut s.show_landmarks);
+            let ears = format!("{}\n{}", self.t(s, "cat_ears"), self.t(s, "cat_ears_hint"));
+            widgets::chip(ui, &pal, Glyph::Ears, self.t(s, "cat_ears"), &mut s.cat_ears).on_hover_text(ears);
+            widgets::chip(ui, &pal, Glyph::Tongue, self.t(s, "tongue"), &mut s.tongue);
+        });
+    }
+
+    /// Across the top of the Advanced view: the calibration with its profiles on the left,
+    /// then the camera centered in the space that is left: controls that grow a little with
+    /// the window, and a preview of the frame's own shape.
+    fn camera_strip(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+        let pal = self.pal;
+        let (fw, fh) = snapshot.frame_size;
+        let aspect = if fw > 0 && fh > 0 { fw as f32 / fh as f32 } else { 16.0 / 9.0 };
+        let preview = Vec2::new(STRIP_PREVIEW * aspect, STRIP_PREVIEW);
+        let gap = 12.0;
+        // What the card adds to its content: the margins and the stroke.
+        let frame = 2.0 * 14.0 + 2.0;
+        let column = Layout::top_down(Align::Min);
+        ui.horizontal_top(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.allocate_ui_with_layout(Vec2::new(CALIBRATION_WIDTH, 0.0), column, |ui| {
+                self.calibration_card(ui, s, snapshot, true);
+            });
+            let rest = ui.available_width();
+            let controls = (rest - frame - gap - preview.x).clamp(260.0, CAMERA_CONTROLS_MAX);
+            let card = controls + gap + preview.x + frame;
+            ui.add_space(((rest - card) / 2.0 - gap).max(0.0));
+            widgets::card(&pal).show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(Vec2::new(controls, 0.0), column, |ui| {
+                        ui.set_min_width(controls);
+                        self.camera_controls(ui, s);
+                        self.camera_chips(ui, s);
+                    });
+                    ui.allocate_ui_with_layout(preview, column, |ui| self.preview(ui, s, snapshot, STRIP_PREVIEW));
+                });
             });
         });
     }
 
-    fn calibration_card(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+    fn calibration_card(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot, profiles: bool) {
         let pal = self.pal;
         // A step shows a check once this avatar has it saved.
         let (neutral_done, gaze_done) = {
@@ -945,7 +1031,115 @@ impl App {
                 (Glyph::Target, "center_gaze", "step_gaze", "center_gaze_hint"),
                 (gaze_done, Command::CenterGaze, Command::ResetGaze, "reset_gaze"),
             );
+            if profiles {
+                self.profiles_block(ui, s, snapshot.avatar_id.as_deref().unwrap_or_default());
+            }
         });
+    }
+
+    /// Saved profiles: pick one to load it onto the current avatar, or type a name and save.
+    fn profiles_block(&mut self, ui: &mut egui::Ui, s: &mut Settings, avatar: &str) {
+        let pal = self.pal;
+        let names: Vec<String> = self.shared.calibrations.lock().profiles.keys().cloned().collect();
+        let active = self.profile_active.clone().filter(|n| names.contains(n));
+        ui.add_space(10.0);
+        ui.label(RichText::new(self.t(s, "profiles")).color(pal.dim).small()).on_hover_text(self.t(s, "profile_hint"));
+        let button_width = 84.0;
+        let (mut load, mut save) = (None, None);
+        let (mut ask, mut confirm, mut cancel) = (false, false, false);
+        ui.horizontal(|ui| {
+            let gap = ui.spacing().item_spacing.x;
+            let reserved = if active.is_some() { button_width + gap } else { 0.0 };
+            let shown = active.clone().unwrap_or_else(|| self.t(s, "profile_none").to_string());
+            egui::ComboBox::from_id_salt("profile")
+                .width((ui.available_width() - reserved).max(80.0))
+                .selected_text(shown)
+                .truncate()
+                .show_ui(ui, |ui| {
+                    for name in &names {
+                        if ui.selectable_label(active.as_ref() == Some(name), name).clicked() {
+                            load = Some(name.clone());
+                        }
+                    }
+                });
+            if active.is_some() {
+                if self.profile_confirm {
+                    // Delete asks first, with a yes and a no where the button was.
+                    (confirm, cancel) = self.confirm_buttons(ui, s);
+                } else {
+                    let spec = Button::new(self.t(s, "profile_delete")).width(button_width);
+                    ask = widgets::button(ui, &pal, spec).clicked();
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let gap = ui.spacing().item_spacing.x;
+            let hint = self.t(s, "profile_name").to_string();
+            let edit = egui::TextEdit::singleline(&mut self.profile_name).hint_text(hint).char_limit(40);
+            let width = (ui.available_width() - button_width - gap).max(60.0);
+            let field = ui.add_sized(Vec2::new(width, 28.0), edit);
+            let name = self.profile_name.trim().to_string();
+            let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let text = self.t(s, "profile_save");
+            let clicked = ui
+                .add_enabled_ui(!name.is_empty(), |ui| {
+                    widgets::button(ui, &pal, Button::new(text).look(Look::Primary).width(button_width)).clicked()
+                })
+                .inner;
+            if (clicked || submitted) && !name.is_empty() {
+                save = Some(name);
+            }
+        });
+        if let Some(name) = load {
+            self.load_profile(s, avatar, &name);
+            self.profile_name = name.clone();
+            self.profile_active = Some(name);
+            self.profile_confirm = false;
+        }
+        if ask {
+            self.profile_confirm = true;
+        }
+        if cancel {
+            self.profile_confirm = false;
+        }
+        if confirm && let Some(name) = active {
+            self.shared.calibrations.lock().profiles.remove(&name);
+            self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
+            self.profile_active = None;
+            self.profile_confirm = false;
+        }
+        if let Some(name) = save {
+            self.save_profile(s, avatar, &name);
+            self.profile_active = Some(name);
+            self.profile_confirm = false;
+        }
+    }
+
+    /// A yes and a no, small, for the actions that cannot be undone: (yes, no) pressed.
+    fn confirm_buttons(&self, ui: &mut egui::Ui, s: &Settings) -> (bool, bool) {
+        let pal = self.pal;
+        let yes = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Check), true).on_hover_text(self.t(s, "yes"));
+        let no = widgets::icon_button(ui, &pal, Icon::Draw(Glyph::Close), false).on_hover_text(self.t(s, "no"));
+        (yes.clicked(), no.clicked())
+    }
+
+    /// Keeps the avatar's calibration and the processing options under `name`.
+    fn save_profile(&self, s: &Settings, avatar: &str, name: &str) {
+        let mut store = self.shared.calibrations.lock();
+        let mut calibration = store.avatars.get(avatar).cloned().unwrap_or_default();
+        // The undo of the last neutral capture belongs to that moment, not to the profile.
+        calibration.neutral_undo = None;
+        store.profiles.insert(name.to_string(), Profile { calibration, processing: s.processing.clone() });
+        self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Replaces the avatar's calibration and the processing options with those of `name`.
+    fn load_profile(&self, s: &mut Settings, avatar: &str, name: &str) {
+        let mut store = self.shared.calibrations.lock();
+        let Some(profile) = store.profiles.get(name).cloned() else { return };
+        store.avatars.insert(avatar.to_string(), profile.calibration);
+        s.processing = profile.processing;
+        self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
     }
 
     /// One calibration step: the action, a line saying how, and the undo next to it.
@@ -976,7 +1170,7 @@ impl App {
     /// Search and the switches that apply to all three tables: one row, or two when narrow.
     fn tools_row(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
         // Two groups that stay whole: one row when both fit, otherwise one row each.
-        let stacked = ui.available_width() < 900.0;
+        let stacked = ui.available_width() < 1140.0;
         ui.spacing_mut().item_spacing = Vec2::new(8.0, 8.0);
         if stacked {
             ui.horizontal(|ui| self.tools_filters(ui, s));
@@ -998,7 +1192,7 @@ impl App {
         let pal = self.pal;
         let hint = self.t(s, "search");
         let id = ui.make_persistent_id("search_field");
-        let (rect, response) = ui.allocate_exact_size(Vec2::new(260.0, 32.0), Sense::click());
+        let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width().min(260.0), 32.0), Sense::click());
         let focused = ui.memory(|m| m.has_focus(id));
         if response.clicked() {
             ui.memory_mut(|m| m.request_focus(id));
@@ -1049,9 +1243,9 @@ impl App {
     fn tools_filters(&mut self, ui: &mut egui::Ui, s: &mut Settings) {
         let pal = self.pal;
         self.search_field(ui, s);
-        let (unused, tongue) = (self.t(s, "unused"), self.t(s, "tongue"));
+        let unused = self.t(s, "unused");
         widgets::switch_toggle(ui, &pal, &mut s.show_unused, unused);
-        widgets::switch_toggle(ui, &pal, &mut s.tongue, tongue);
+        self.filter_controls(ui, s);
     }
 
     /// How the values are processed, and the reset for the rows.
@@ -1065,14 +1259,34 @@ impl App {
         let (name, off) = (self.t(s, "smoothing"), self.t(s, "smoothing_off"));
         let hint = self.t(s, "smoothing_hint");
         self.slider_box(ui, &mut s.processing.smoothing, name, off, 190.0).on_hover_text(hint);
-        let reset = widgets::button(ui, &pal, Button::new(self.t(s, "reset")).glyph(Glyph::Undo).look(Look::Quiet));
-        if reset.on_hover_text(self.t(s, "reset_rows")).clicked() {
+        self.reset_all_button(ui, s, &avatar);
+    }
+
+    /// Sets every parameter back to its defaults. It asks first, with a yes and a no, so a
+    /// slip does not lose the calibration of the avatar.
+    fn reset_all_button(&mut self, ui: &mut egui::Ui, s: &mut Settings, avatar: &str) {
+        let pal = self.pal;
+        if self.reset_confirm {
+            ui.label(RichText::new(format!("{}?", self.t(s, "reset_all"))).color(pal.dim));
+            let (yes, no) = self.confirm_buttons(ui, s);
+            if no {
+                self.reset_confirm = false;
+            }
+            if !yes {
+                return;
+            }
+            self.reset_confirm = false;
             s.processing = processing::ProcessingSettings::default();
-            if let Some(c) = self.shared.calibrations.lock().avatars.get_mut(&avatar) {
+            if let Some(c) = self.shared.calibrations.lock().avatars.get_mut(avatar) {
                 c.channels.clear();
                 c.unlinked.clear();
             }
             self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
+            return;
+        }
+        let spec = Button::new(self.t(s, "reset_all")).glyph(Glyph::Undo).look(Look::Quiet);
+        if widgets::button(ui, &pal, spec).on_hover_text(self.t(s, "reset_all_hint")).clicked() {
+            self.reset_confirm = true;
         }
     }
 
@@ -1082,7 +1296,12 @@ impl App {
             egui::ScrollArea::vertical().id_salt("simple").auto_shrink([false, false]).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 12.0;
                 self.camera_card(ui, s, snapshot, false);
-                self.calibration_card(ui, s, snapshot);
+                self.calibration_card(ui, s, snapshot, true);
+                let size = Vec2::new(ui.available_width(), 420.0);
+                ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                    ui.set_min_size(size);
+                    self.mediapipe_panel(ui, s, snapshot, true);
+                });
             });
             return;
         }
@@ -1094,7 +1313,14 @@ impl App {
             let column = Layout::top_down(Align::Min);
             ui.allocate_ui_with_layout(Vec2::new(main, height), column, |ui| self.camera_card(ui, s, snapshot, true));
             ui.allocate_ui_with_layout(Vec2::new(SIDEBAR_WIDTH, height), column, |ui| {
-                self.calibration_card(ui, s, snapshot);
+                self.calibration_card(ui, s, snapshot, true);
+                ui.add_space(12.0);
+                // The rest of the column: every MediaPipe parameter, to search and calibrate.
+                let size = Vec2::new(SIDEBAR_WIDTH, ui.available_height().max(160.0));
+                ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                    ui.set_min_size(size);
+                    self.mediapipe_panel(ui, s, snapshot, true);
+                });
             });
         });
     }
@@ -1217,45 +1443,102 @@ impl App {
         ui.ctx().request_repaint();
     }
 
-    /// A pink tongue between the lips: its length follows tongueOut, it leans with left and
-    /// right, lifts with up, and narrows with roll.
+    /// A tongue coming out over the lower lip, drawn in the mouth's own frame (the corner line,
+    /// and across it the side of the chin) so it follows a tilted or mirrored face. Out sets its
+    /// length; it leaves the mouth downwards and its centre line curves toward the tip, which left
+    /// and right move sideways and up lifts over the upper lip. Roll narrows it and curls its
+    /// edges in.
     fn draw_tongue(&self, painter: &egui::Painter, snapshot: &Snapshot, to_screen: &dyn Fn(&[f32; 3]) -> Pos2) {
+        const STEPS: usize = 16;
         let lm = &snapshot.landmarks;
         let at = |i: usize| to_screen(&lm[i]);
-        let (left, right) = (at(61), at(291));
-        let width = (right - left).length();
-        if width < 4.0 {
-            return;
-        }
-        let across = (right - left) / width;
-        let down = Vec2::new(-across.y, across.x);
         let first = channels::MEDIAPIPE.len();
         let v = |i: usize| snapshot.input[first + i].clamp(0.0, 1.0);
-        let (out, to_left, to_right, up, below, roll) = (v(0), v(1), v(2), v(3), v(4), v(5));
-        if out < 0.04 {
+        let (out, left, right, up, down_value, roll) = (v(0), v(1), v(2), v(3), v(4), v(5));
+        let corners = at(291) - at(61);
+        let width = corners.length();
+        if out < 0.06 || width < 4.0 {
             return;
         }
-        let base = at(13).lerp(at(14), 0.6);
-        let lift = (1.0 - 1.4 * up + 0.4 * below).clamp(-0.2, 1.1);
-        let dir = (down * lift + across * (to_right - to_left) * 0.7).normalized();
-        let side = Vec2::new(-dir.y, dir.x);
-        let length = width * 0.85 * out;
-        let half = width * 0.17 * (1.0 - 0.45 * roll);
-        let steps = 14;
-        let edge = |k: usize, sign: f32| {
-            let t = k as f32 / steps as f32;
-            base + dir * (length * t) + side * (sign * half * (1.0 - t * t).sqrt())
-        };
-        let mut outline: Vec<Pos2> = (0..=steps).map(|k| edge(k, 1.0)).collect();
-        outline.extend((0..=steps).rev().map(|k| edge(k, -1.0)));
-        let line = Color32::from_rgb(176, 64, 96);
-        painter.add(Shape::convex_polygon(
-            outline,
-            Color32::from_rgba_unmultiplied(236, 112, 144, 235),
-            Stroke::new(1.0, line),
+        // Toward the subject's left, and toward the chin.
+        let across = corners / width;
+        let mut down = across.rot90();
+        if down.dot(at(152) - at(14)) < 0.0 {
+            down = -down;
+        }
+        let root = at(13).lerp(at(14), 0.7);
+        let length = width * 0.95 * out;
+        // A quadratic curve: it starts along `down` (less of it the more the tongue lifts) and
+        // ends at the tip.
+        let control = root + down * (length * 0.45 * (1.0 - 0.8 * up));
+        let reach = down * (length * (1.0 - 1.6 * up + 0.25 * down_value)) + across * (length * 1.1 * (left - right));
+        // Pointing sideways turns the tongue, it does not make it longer.
+        let tip = root + reach * (length / reach.length().max(length));
+        let narrow = 1.0 - 0.45 * roll;
+        // Centre point, half-width vector and direction at each step from the lip to the tip.
+        let spine: Vec<(Pos2, Vec2, Vec2)> = (0..=STEPS)
+            .map(|k| {
+                let t = k as f32 / STEPS as f32;
+                let s = 1.0 - t;
+                let point = root + (control - root) * (2.0 * s * t) + (tip - root) * (t * t);
+                let direction = ((control - root) * s + (tip - control) * t).normalized();
+                let direction = if direction.is_finite() { direction } else { down };
+                (point, direction.rot90() * (width * (0.21 - 0.07 * t) * narrow), direction)
+            })
+            .collect();
+        let (end, end_side, end_direction) = spine[STEPS];
+        let cap: Vec<Pos2> = (1..8)
+            .map(|k| {
+                let angle = std::f32::consts::PI * k as f32 / 8.0;
+                end + end_side * angle.cos() + end_direction * (end_side.length() * angle.sin())
+            })
+            .collect();
+
+        // The body as a triangle strip along the curve (it can bend, so not one convex polygon),
+        // then a fan for the round tip.
+        let pink = Color32::from_rgb(240, 118, 150);
+        let edge = Color32::from_rgb(196, 62, 104);
+        let mut mesh = egui::Mesh::default();
+        for &(point, side, _) in &spine {
+            mesh.colored_vertex(point + side, pink);
+            mesh.colored_vertex(point - side, pink);
+        }
+        for k in 0..STEPS as u32 {
+            let i = 2 * k;
+            mesh.add_triangle(i, i + 1, i + 2);
+            mesh.add_triangle(i + 1, i + 3, i + 2);
+        }
+        let centre = mesh.vertices.len() as u32;
+        mesh.colored_vertex(end, pink);
+        let mut previous = 2 * STEPS as u32;
+        for &point in &cap {
+            let i = mesh.vertices.len() as u32;
+            mesh.colored_vertex(point, pink);
+            mesh.add_triangle(centre, previous, i);
+            previous = i;
+        }
+        mesh.add_triangle(centre, previous, 2 * STEPS as u32 + 1);
+        painter.add(Shape::mesh(mesh));
+
+        // The outline, open at the lip, the groove down the middle and, rolled, the curled edges.
+        let mut outline: Vec<Pos2> = spine.iter().map(|&(point, side, _)| point + side).collect();
+        outline.extend(&cap);
+        outline.extend(spine.iter().rev().map(|&(point, side, _)| point - side));
+        painter.add(Shape::line(outline, Stroke::new(1.4, edge)));
+        let inner = &spine[2..STEPS - 2];
+        painter.add(Shape::line(
+            inner.iter().map(|&(point, _, _)| point).collect(),
+            Stroke::new(1.0, edge.gamma_multiply(0.6)),
         ));
-        let groove = [base + dir * (length * 0.1), base + dir * (length * 0.75)];
-        painter.line_segment(groove, Stroke::new(1.0, line.gamma_multiply(0.7)));
+        if roll > 0.2 {
+            let curl = Stroke::new(1.2, edge.gamma_multiply(roll));
+            for sign in [1.0, -1.0] {
+                painter.add(Shape::line(
+                    inner.iter().map(|&(point, side, _)| point + side * (0.55 * sign)).collect(),
+                    curl,
+                ));
+            }
+        }
     }
 
     /// Two triangles above the forehead whose tilt follows the ear outputs.
@@ -1325,6 +1608,12 @@ impl App {
         if response.hovered() || highlight {
             painter.rect_filled(row_inset(rect), CornerRadius::same(5), pal.line.gamma_multiply(0.5));
         }
+        // The row whose editor is open, so it is clear which one the editor belongs to.
+        if self.expanded.is_some_and(|open| open == index || channels::mirror(index) == Some(open)) {
+            painter.rect_filled(row_inset(rect), CornerRadius::same(5), pal.accent.gamma_multiply(0.18));
+            let bar = Rect::from_min_size(rect.left_top() + Vec2::new(2.0, 5.0), Vec2::new(3.0, rect.height() - 10.0));
+            painter.rect_filled(bar, CornerRadius::same(2), pal.accent);
+        }
         let value = snapshot.values[index];
         paint_meter(&painter, rect, &pal, value, false, used);
         let color = if used { pal.text } else { pal.dim };
@@ -1336,18 +1625,16 @@ impl App {
         painter.galley(text_pos, galley, color);
         let mut x = text_right + 9.0;
         painter.circle_filled(Pos2::new(x, rect.center().y), 2.2, if used { pal.accent } else { pal.line });
-        let calibration = self.shared.calibrations.lock().avatars.get(avatar).map(|c| c.get(index)).unwrap_or_default();
-        if !calibration.is_default() {
-            // Calibrated for this avatar: a small diamond.
-            x += 11.0;
-            let c = Pos2::new(x, rect.center().y);
-            let points = vec![
-                c + Vec2::new(0.0, -3.6),
-                c + Vec2::new(3.6, 0.0),
-                c + Vec2::new(0.0, 3.6),
-                c + Vec2::new(-3.6, 0.0),
-            ];
-            painter.add(Shape::convex_polygon(points, pal.accent, Stroke::NONE));
+        let modified = {
+            let store = self.shared.calibrations.lock();
+            self.is_modified(s, store.avatars.get(avatar).unwrap_or(&AvatarCalibration::default()), index)
+        };
+        if modified {
+            // Changed and not saved: a small pencil; the hover says what.
+            x += 14.0;
+            let icon = Rect::from_center_size(Pos2::new(x, rect.center().y), Vec2::splat(12.0));
+            icons::paint(&painter, Glyph::Edited, icon, pal.accent);
+            x += 2.0;
         }
         if s.processing.source(index) == Source::Mesh {
             // Taken from the face mesh instead of the model: a small outlined square.
@@ -1362,12 +1649,88 @@ impl App {
             FontId::proportional(12.5),
             if used { pal.text } else { pal.dim },
         );
-        response.on_hover_text(format!(
-            "{} · {} {}",
-            channels::name(index),
-            percent(snapshot.input[index]),
-            self.t(s, "current_input")
-        ))
+        response.on_hover_ui(|ui| {
+            let input = percent(snapshot.input[index]);
+            ui.label(format!("{} · {input} {}", channels::name(index), self.t(s, "current_input")));
+            let changes = {
+                let store = self.shared.calibrations.lock();
+                self.modifications(s, &store.avatars.get(avatar).cloned().unwrap_or_default(), index)
+            };
+            if !changes.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(self.t(s, "modified")).strong().color(pal.accent));
+                for line in changes {
+                    ui.label(line);
+                }
+            }
+        })
+    }
+
+    /// Whether the parameter differs from the saved profile in use (the defaults when there
+    /// is none): range, override, linked sides, smoothing, source or symmetry.
+    fn is_modified(&self, s: &Settings, calibration: &AvatarCalibration, index: usize) -> bool {
+        let base = &self.baseline;
+        let name = channels::name(index);
+        let paired = channels::mirror(index).is_some();
+        calibration.get(index) != base.calibration.get(index)
+            || (paired && calibration.linked(index) != base.calibration.linked(index))
+            || s.processing.smoothing_channels.get(name) != base.processing.smoothing_channels.get(name)
+            || s.processing.source(index) != base.processing.source(index)
+            || channels::symmetry_group(index)
+                .is_some_and(|group| s.processing.symmetry.get(group) != base.processing.symmetry.get(group))
+    }
+
+    /// One line for each way [`Self::is_modified`] finds the parameter changed.
+    fn modifications(&self, s: &Settings, calibration: &AvatarCalibration, index: usize) -> Vec<String> {
+        let base = &self.baseline;
+        let (c, was) = (calibration.get(index), base.calibration.get(index));
+        let name = channels::name(index);
+        let mut lines = Vec::new();
+        if (c.min, c.max) != (was.min, was.max) {
+            lines.push(format!("{} {}–{}", self.t(s, "range"), percent(c.min), percent(c.max)));
+        }
+        if c.overriding() != was.overriding() {
+            let shown = c.overriding().map_or_else(|| self.t(s, "smoothing_off").to_string(), percent);
+            lines.push(format!("{} {shown}", self.t(s, "override")));
+        }
+        if channels::mirror(index).is_some() && calibration.linked(index) != base.calibration.linked(index) {
+            let key = if calibration.linked(index) { "linked" } else { "unlinked" };
+            lines.push(self.t(s, key).to_string());
+        }
+        if s.processing.smoothing_channels.get(name) != base.processing.smoothing_channels.get(name) {
+            let strength = s.processing.smoothing_for(index);
+            let shown = if strength > 0.0 { percent(strength) } else { self.t(s, "smoothing_off").to_string() };
+            lines.push(format!("{} {shown}", self.t(s, "smoothing")));
+        }
+        if s.processing.source(index) != base.processing.source(index) {
+            let source = if s.processing.source(index) == Source::Mesh { "mesh" } else { "model" };
+            lines.push(format!("{}: {}", self.t(s, "source"), self.t(s, source)));
+        }
+        if let Some(group) = channels::symmetry_group(index)
+            && s.processing.symmetry.get(group) != base.processing.symmetry.get(group)
+        {
+            let state = if s.processing.group_symmetric(group) { self.t(s, "on") } else { self.t(s, "smoothing_off") };
+            lines.push(format!("{}: {state}", self.t(s, "symmetry")));
+        }
+        lines
+    }
+
+    /// The group filter and the switch that keeps only the changed parameters.
+    fn filter_controls(&mut self, ui: &mut egui::Ui, s: &Settings) {
+        let pal = self.pal;
+        let all = self.t(s, "filter_all");
+        let current = match self.filter_group {
+            0 => all,
+            group => self.t(s, channels::CATEGORIES[group - 1].0),
+        };
+        egui::ComboBox::from_id_salt("filter-group").width(120.0).selected_text(current).show_ui(ui, |ui| {
+            ui.selectable_value(&mut self.filter_group, 0, all);
+            for (group, (key, _)) in channels::CATEGORIES.iter().enumerate() {
+                ui.selectable_value(&mut self.filter_group, group + 1, tr(s.language, key));
+            }
+        });
+        let modified = self.t(s, "modified");
+        widgets::switch_toggle(ui, &pal, &mut self.filter_modified, modified);
     }
 
     /// Calibration, source, symmetry and smoothing for one row (one channel or a L/R pair).
@@ -1376,7 +1739,8 @@ impl App {
         let mut store = self.shared.calibrations.lock();
         let calibration = store.avatars.entry(avatar.to_string()).or_default();
         let mut changed = false;
-        Frame::new().fill(pal.bg).stroke(Stroke::new(1.0, pal.line)).inner_margin(Margin::same(8)).show(ui, |ui| {
+        let outline = Stroke::new(1.0, pal.accent.gamma_multiply(0.6));
+        Frame::new().fill(pal.bg).stroke(outline).inner_margin(Margin::same(8)).show(ui, |ui| {
             // The channel list lays rows out without spacing; the editor needs the normal gaps.
             ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
             ui.horizontal_wrapped(|ui| {
@@ -1478,9 +1842,27 @@ impl App {
         }
     }
 
-    fn mediapipe_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot) {
+    fn mediapipe_panel(&mut self, ui: &mut egui::Ui, s: &mut Settings, snapshot: &Snapshot, simple: bool) {
         let used = self.used_channels(snapshot);
         let tongue = s.tongue;
+        let show_unused = if simple { s.simple_unused } else { s.show_unused };
+        let (group, only_modified, open) = (self.filter_group, self.filter_modified, self.expanded);
+        self.baseline = {
+            let store = self.shared.calibrations.lock();
+            self.profile_active.as_ref().and_then(|name| store.profiles.get(name)).cloned().unwrap_or_default()
+        };
+        let modified: Vec<bool> = {
+            let store = self.shared.calibrations.lock();
+            let calibration = store.avatars.get(snapshot.avatar_id.as_deref().unwrap_or_default());
+            let fallback = AvatarCalibration::default();
+            (0..COUNT).map(|i| self.is_modified(s, calibration.unwrap_or(&fallback), i)).collect()
+        };
+        // A row whose editor is open stays in the list, or resetting it would make it vanish
+        // and close the editor under the pointer.
+        let filtered = move |i: usize| {
+            let editing = open.is_some_and(|e| e == i || channels::mirror(i) == Some(e));
+            (group == 0 || channels::category(i) == Some(group - 1)) && (!only_modified || modified[i] || editing)
+        };
         let visible = move |i: usize| !channels::is_tongue(i) || tongue;
         let total = (1..COUNT).filter(|&i| visible(i)).count();
         let active = (1..COUNT).filter(|&i| visible(i) && used[i]).count();
@@ -1489,7 +1871,7 @@ impl App {
         let frame = self.panel_frame().show(ui, |ui| {
             let (dim, title) = (self.pal.dim, self.t(s, "mediapipe"));
             let title = |ui: &mut egui::Ui| {
-                ui.label(RichText::new(format!("{active}/{}", total - active)).color(dim));
+                ui.label(RichText::new(format!("{active}/{total}")).color(dim));
                 ui.add(egui::Label::new(RichText::new(title).font(FontId::new(13.5, widgets::semibold()))).truncate());
             };
             header(ui, "mediapipe", title, |_: &mut egui::Ui| {});
@@ -1511,6 +1893,20 @@ impl App {
                     _ => {}
                 }
             }
+            if simple {
+                // The Advanced view has its search in the toolbar above the tables.
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    self.search_field(ui, s);
+                    let unused = self.t(s, "unused");
+                    widgets::switch_toggle(ui, &self.pal, &mut s.simple_unused, unused);
+                });
+                ui.horizontal(|ui| {
+                    self.filter_controls(ui, s);
+                    self.reset_all_button(ui, s, &avatar);
+                });
+                ui.add_space(4.0);
+            }
             ui.separator();
             egui::ScrollArea::vertical().id_salt("mp").auto_shrink([false, false]).show(ui, |ui| {
                 self.rows.view[0] = ui.clip_rect();
@@ -1520,13 +1916,15 @@ impl App {
                 let half = (full / 2.0).floor();
                 // Too narrow for left and right side by side: one channel per line.
                 let single = half < 160.0;
+                let mut shown = 0;
                 for group in channels::display_rows() {
                     let rows: Vec<_> = group
                         .into_iter()
                         .filter(|(l, r)| {
                             let show = |i: usize| {
                                 visible(i)
-                                    && (s.show_unused || used[i])
+                                    && (show_unused || used[i])
+                                    && filtered(i)
                                     && (self.matches(&channels::label(i)) || self.matches(channels::name(i)))
                             };
                             show(*l) || r.is_some_and(show)
@@ -1535,6 +1933,7 @@ impl App {
                     if rows.is_empty() {
                         continue;
                     }
+                    shown += rows.len();
                     for (l, r) in rows {
                         let lines: Vec<Vec<(usize, f32)>> = match r {
                             Some(r) if single => vec![vec![(l, full)], vec![(r, full)]],
@@ -1575,6 +1974,10 @@ impl App {
                     }
                     ui.add_space(10.0);
                 }
+                if shown == 0 {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(self.t(s, "filter_empty")).color(self.pal.dim));
+                }
             });
         });
         self.rows.frame[0] = frame.response.rect;
@@ -1588,7 +1991,7 @@ impl App {
         let related = self.related();
         let frame = self.panel_frame().show(ui, |ui| {
             let active = if known { bound } else { 0 };
-            let count = format!("{active}/{}", visible.len() - active);
+            let count = format!("{active}/{}", visible.len());
             let (title, hint) = (format!("{} ↗", self.t(s, "unified")), self.t(s, "mapping_docs"));
             let title = |ui: &mut egui::Ui| {
                 ui.label(RichText::new(count).color(pal.dim));
@@ -1654,13 +2057,21 @@ impl App {
             .collect();
         let related = self.related();
         let frame = self.panel_frame().show(ui, |ui| {
-            let count = format!("{}/{}", if known { bound.len() } else { 0 }, unmatched.len());
+            let count = format!("{}/{}", if known { bound.len() } else { 0 }, bound.len() + unmatched.len());
             let name =
                 snapshot.avatar_name.clone().or_else(|| snapshot.avatar_id.clone()).unwrap_or_else(|| "—".into());
-            let title = format!("{} {name}", self.t(s, "avatar"));
+            // Without a connected VRChat this is the avatar of the last session: grey, and it says so.
+            let live = snapshot.avatar_live;
+            let title = format!("{} {name}", self.t(s, if live { "avatar" } else { "avatar_last" }));
+            let hint = self.t(s, "avatar_last_hint");
             let title = |ui: &mut egui::Ui| {
                 ui.label(RichText::new(count).color(pal.dim));
-                ui.add(egui::Label::new(RichText::new(title).font(FontId::new(13.5, widgets::semibold()))).truncate());
+                let color = if live { pal.text } else { pal.dim };
+                let text = RichText::new(title).font(FontId::new(13.5, widgets::semibold())).color(color);
+                let label = ui.add(egui::Label::new(text).truncate());
+                if !live {
+                    label.on_hover_text(hint);
+                }
             };
             header(ui, "avatar", title, |_: &mut egui::Ui| {});
             ui.separator();
@@ -2880,20 +3291,6 @@ impl eframe::App for App {
         ui.painter().hline(edge.x_range(), edge.bottom() - 0.5, Stroke::new(1.0, self.pal.line));
         self.window_edges(&ctx);
         let advanced = s.advanced;
-        if !compact && advanced {
-            let frame = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 14));
-            egui::Panel::left("sidebar")
-                .exact_size(SIDEBAR_WIDTH)
-                .resizable(false)
-                .frame(frame)
-                .show(ui, |ui| self.sidebar(ui, &mut s, &snapshot));
-            if let Some(times) = new_frame
-                && new_preview
-            {
-                let breakdown = perf::interface_breakdown(&times, draw_started, Instant::now());
-                self.shared.perf.lock().record_path(Path::Preview, breakdown);
-            }
-        }
         let body = Frame::new().fill(self.pal.bg).inner_margin(Margin::symmetric(16, 14));
         egui::CentralPanel::default().frame(body).show(ui, |ui| {
             if !advanced {
@@ -2906,7 +3303,16 @@ impl eframe::App for App {
                 }
                 return;
             }
-            if compact {
+            if !compact {
+                self.camera_strip(ui, &mut s, &snapshot);
+                ui.add_space(8.0);
+                if let Some(times) = new_frame
+                    && new_preview
+                {
+                    let breakdown = perf::interface_breakdown(&times, draw_started, Instant::now());
+                    self.shared.perf.lock().record_path(Path::Preview, breakdown);
+                }
+            } else {
                 let title = format!("{} · {}", self.t(&s, "camera"), self.t(&s, "calibrate"));
                 let title = widgets::title(&self.pal, &title);
                 egui::CollapsingHeader::new(title).default_open(false).show(ui, |ui| {
@@ -2919,7 +3325,7 @@ impl eframe::App for App {
                             self.camera_card(ui, &mut s, &snapshot, false);
                         });
                         ui.allocate_ui_with_layout(Vec2::new(width, 0.0), column, |ui| {
-                            self.calibration_card(ui, &mut s, &snapshot);
+                            self.calibration_card(ui, &mut s, &snapshot, false);
                         });
                     });
                 });
@@ -2945,7 +3351,7 @@ impl eframe::App for App {
             let tables_started = Instant::now();
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = gap;
-                column(ui, Vec2::new(mp, height), &mut |ui| self.mediapipe_panel(ui, &mut s, &snapshot));
+                column(ui, Vec2::new(mp, height), &mut |ui| self.mediapipe_panel(ui, &mut s, &snapshot, false));
                 if self.narrow {
                     let side = width - gap - mp;
                     let half = ((height - 10.0) / 2.0).floor();

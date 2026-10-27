@@ -29,6 +29,8 @@ pub enum Glyph {
     Check,
     Symmetry,
     Smooth,
+    Edited,
+    Tongue,
     Minimize,
     Maximize,
     Restore,
@@ -232,6 +234,20 @@ pub fn paint(painter: &Painter, glyph: Glyph, rect: Rect, color: Color32) {
             let mut wave = c.bezier((2.0, 15.0), (7.0, 3.0), (12.0, 12.0));
             wave.extend(c.bezier((12.0, 12.0), (17.0, 21.0), (22.0, 9.0)));
             c.line(&wave);
+        }
+        Glyph::Edited => {
+            c.line(&[(4.0, 20.0), (5.0, 15.0), (16.0, 4.0), (20.0, 8.0), (9.0, 19.0), (4.0, 20.0)]);
+            c.line(&[(13.0, 7.0), (17.0, 11.0)]);
+        }
+        Glyph::Tongue => {
+            // The lips, and a tongue hanging from them with its groove.
+            c.line(&[(4.0, 7.0), (20.0, 7.0)]);
+            let mut tongue = vec![(7.5, 7.0), (7.5, 14.0)];
+            tongue.extend(c.bezier((7.5, 14.0), (7.5, 22.0), (12.0, 22.0)));
+            tongue.extend(c.bezier((12.0, 22.0), (16.5, 22.0), (16.5, 14.0)));
+            tongue.push((16.5, 7.0));
+            c.line(&tongue);
+            c.line(&[(12.0, 11.0), (12.0, 16.5)]);
         }
         Glyph::Minimize => c.line(&[(5.0, 12.0), (19.0, 12.0)]),
         Glyph::Maximize => c.rect((5.0, 5.0), (19.0, 19.0), 1.5),

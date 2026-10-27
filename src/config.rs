@@ -37,6 +37,8 @@ pub struct Settings {
     pub cat_ears: bool,
     pub tongue: bool,
     pub show_unused: bool,
+    /// The same switch for the list in the Simple view, which starts with the unused ones hidden.
+    pub simple_unused: bool,
     /// The full view with the channel tables; off shows the simple one.
     pub advanced: bool,
     pub camera_blur: bool,
@@ -75,6 +77,7 @@ impl Default for Settings {
             cat_ears: false,
             tongue: true,
             show_unused: true,
+            simple_unused: false,
             advanced: false,
             camera_blur: true,
             debug: false,
@@ -83,7 +86,7 @@ impl Default for Settings {
             friendly_names: true,
             interface_scale: 1.0,
             language: Language::En,
-            scheme: Scheme::Black,
+            scheme: Scheme::Default,
             custom_colors: CustomColors::default(),
             osc_host: "127.0.0.1".into(),
             send_port: 9000,

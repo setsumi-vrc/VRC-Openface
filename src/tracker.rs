@@ -78,6 +78,8 @@ pub struct Snapshot {
     /// Face tracking parameter names (after `v2/`) the avatar declares.
     pub avatar_ft_params: Vec<String>,
     pub vrchat_found: bool,
+    /// The avatar comes from a connected VRChat, not from the last session.
+    pub avatar_live: bool,
     pub tongue: TongueStatus,
     pub face_device: String,
     pub tongue_device: String,
@@ -105,6 +107,7 @@ impl Default for Snapshot {
             avatar_name: None,
             avatar_ft_params: Vec::new(),
             vrchat_found: false,
+            avatar_live: false,
             tongue: TongueStatus::Off,
             face_device: String::new(),
             tongue_device: String::new(),
@@ -233,6 +236,7 @@ struct Avatar {
     flags: Vec<String>,
     ft_params: Vec<String>,
     vrchat_found: bool,
+    live: bool,
 }
 
 struct Tracker {
@@ -281,6 +285,7 @@ impl Tracker {
                 flags: Vec::new(),
                 ft_params: Vec::new(),
                 vrchat_found: false,
+                live: false,
             },
             started: Instant::now(),
             last_timestamp: 0,
@@ -441,7 +446,13 @@ impl Tracker {
             let r = self.sources.receiver.lock();
             (r.generation, r.avatar_id.clone())
         };
+        // With OSCQuery in use the avatar is live while it answers; without it, once VRChat
+        // has announced one (the receiver starts with the remembered avatar, at generation 0).
+        // Otherwise it is the one remembered from the last session.
+        let live = if oq_generation > 0 { oq_avatar.is_some() } else { rx_generation > 0 && rx_id.is_some() };
         let id = oq_avatar.as_ref().and_then(|a| a.id.clone()).or(rx_id).or_else(|| settings.last_avatar_id.clone());
+        // Outside the key: closing VRChat changes this without changing the avatar.
+        self.avatar.live = live;
         let key = (oq_generation, rx_generation, id.clone(), settings.send_without_avatar, settings.cat_ears);
         if self.avatar.key.as_ref() == Some(&key) {
             return;
@@ -494,6 +505,7 @@ impl Tracker {
         snapshot.avatar_name.clone_from(&self.avatar.info.name);
         snapshot.avatar_ft_params.clone_from(&self.avatar.ft_params);
         snapshot.vrchat_found = self.avatar.vrchat_found;
+        snapshot.avatar_live = self.avatar.live;
     }
 
     fn step(&mut self, settings: &Settings) -> Result<(), Status> {

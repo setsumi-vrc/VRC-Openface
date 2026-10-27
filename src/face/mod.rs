@@ -24,7 +24,7 @@ use ort::value::Tensor;
 use crate::image::{Border, RgbFrame};
 use detector::FaceDetector;
 use filter::LandmarkFilter;
-pub use tongue::{TONGUE_CHANNELS, TongueModel};
+pub use tongue::{TONGUE_CHANNELS, TongueModel, mouth_crop};
 
 pub const LANDMARK_COUNT: usize = 478;
 pub const BLENDSHAPE_COUNT: usize = 52;

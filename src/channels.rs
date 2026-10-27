@@ -104,6 +104,23 @@ pub const SYMMETRY_GROUPS: [(&str, &[(&str, &str)]); 19] = [
 /// movement stays independent.
 pub const ASYMMETRIC_BY_DEFAULT: [&str; 2] = ["jaw", "tongue"];
 
+/// Groups of the filter: the text key of each and the channel name prefix that belongs to it.
+pub const CATEGORIES: [(&str, &str); 7] = [
+    ("cat_brows", "brow"),
+    ("cat_eyes", "eye"),
+    ("cat_cheeks", "cheek"),
+    ("cat_nose", "nose"),
+    ("cat_jaw", "jaw"),
+    ("cat_mouth", "mouth"),
+    ("tongue", "tongue"),
+];
+
+/// Position of the channel's group in [`CATEGORIES`].
+pub fn category(index: usize) -> Option<usize> {
+    let n = name(index);
+    CATEGORIES.iter().position(|(_, prefix)| n.starts_with(prefix))
+}
+
 /// Symmetry group a channel belongs to.
 pub fn symmetry_group(index: usize) -> Option<&'static str> {
     let n = name(index);

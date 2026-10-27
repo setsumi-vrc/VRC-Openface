@@ -12,6 +12,37 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
+### Added
+- A "Default" color style, the app's own dark look with an amber accent; it is the style a first run starts with. Saved "Custom" colors are kept.
+- Profiles in the Advanced view too: the strip across the top holds the calibration with its profiles on the left, then the camera centered in the space left; the search and the other tools stay in their row below.
+- Reset all, in the Simple view's list and in the Advanced toolbar: sets every parameter back to its defaults (pressed twice to confirm; the gaze center is kept).
+- The parameter whose editor is open is tinted and marked, so it is clear which one the editor belongs to.
+- A small pencil on every parameter changed and not saved (range, override, linked sides, smoothing, source or symmetry), measured against the saved profile in use or, without one, the defaults; hovering the row lists what changed. Saving a profile clears them.
+- Filters for the MediaPipe list (Face expressions): by group (brows, eyes, cheeks, nose, jaw, mouth, tongue) and only the modified ones, in the Simple and the Advanced view.
+- An Unused switch next to the search in the Simple view's parameter list, off by default (separate from the Advanced one).
+- Profiles in the Simple view: save the calibration of every parameter (ranges, overrides, linked sides, gaze center) together with the processing options under a name, load it again onto the current avatar, and delete it (pressed twice).
+- The Simple view lists every MediaPipe parameter under the calibration, with search; clicking one opens its calibration, smoothing and symmetry.
+- A Tongue button next to Cat ears, in both views (it is no longer a switch in the Advanced toolbar).
+- The app version, small and light, next to the title in the top bar.
+
+### Changed
+- The Avatar panel says "Last avatar" in grey, with a tooltip, when VRChat is not connected and the avatar is the one remembered from the last session.
+- The minimum window width is 1220 points.
+- Delete (profile) and Reset all ask with a small yes and no instead of pressing twice.
+- The camera in the Advanced view is larger and keeps the shape of the frame, with no black bars to the sides.
+- The MediaPipe panel is called Face expressions, and the counts in the three panels show used over the full number (52/57) instead of used and unused.
+- The side column of the Simple view is wider (460 pt, taken from the camera), so the parameter editor fits.
+- In the Advanced view the camera and the calibration sit in a wide strip across the top (it can be collapsed) instead of a narrow sidebar, with a much larger preview.
+- The tongue in the face landmarks is larger and easier to see in the small preview.
+- Labels can no longer be selected with the mouse, so the title in the top bar does not highlight.
+- The tongue drawn in the face landmarks follows the mouth: it comes out over the lower lip and bends toward where it points (sideways, up over the upper lip, down), on a tilted or mirrored face too; roll narrows it and curls its edges in.
+
+### Fixed
+- The size of the app data in Settings is shown with three decimals, so a small folder no longer reads 0 MB.
+- The color buttons of the Custom style opened a picker that closed the menu with it; the picker now opens inside the menu.
+
 ## [0.5.0] - 2026-10-26
 
 ### Added

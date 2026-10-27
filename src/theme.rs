@@ -3,23 +3,34 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Scheme {
+    /// The first-run look.
+    #[default]
+    Default,
     Black,
     Light,
     Violet,
     Pink,
     Blue,
     Green,
-    /// The first-run default, starting from `CustomColors::default()`.
-    #[default]
+    /// Colors picked by the user, starting from `CustomColors::default()`.
     Custom,
 }
 
 impl Scheme {
-    pub const ALL: [Scheme; 7] =
-        [Scheme::Black, Scheme::Light, Scheme::Violet, Scheme::Pink, Scheme::Blue, Scheme::Green, Scheme::Custom];
+    pub const ALL: [Scheme; 8] = [
+        Scheme::Default,
+        Scheme::Black,
+        Scheme::Light,
+        Scheme::Violet,
+        Scheme::Pink,
+        Scheme::Blue,
+        Scheme::Green,
+        Scheme::Custom,
+    ];
 
     pub fn text_key(self) -> &'static str {
         match self {
+            Scheme::Default => "theme_default",
             Scheme::Black => "theme_black",
             Scheme::Light => "theme_light",
             Scheme::Violet => "theme_violet",
@@ -106,6 +117,7 @@ impl Palette {
     pub fn of(scheme: Scheme, custom: &CustomColors) -> Palette {
         let c = Color32::from_rgb;
         match scheme {
+            Scheme::Default => build(c(8, 8, 12), c(16, 16, 24), c(235, 235, 235), c(255, 170, 60)),
             Scheme::Black => build(c(0, 0, 0), c(0, 0, 0), c(235, 235, 235), c(235, 235, 235)),
             Scheme::Light => build(c(246, 246, 244), c(255, 255, 255), c(24, 24, 28), c(24, 24, 28)),
             Scheme::Violet => build(c(16, 10, 28), c(24, 16, 40), c(232, 224, 255), c(178, 140, 255)),

@@ -385,6 +385,16 @@ impl Processor {
 #[serde(default)]
 pub struct CalibrationStore {
     pub avatars: BTreeMap<String, AvatarCalibration>,
+    /// Saved profiles, available for every avatar.
+    pub profiles: BTreeMap<String, Profile>,
+}
+
+/// A named copy of an avatar's calibration and of the processing options, to load again later.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Profile {
+    pub calibration: AvatarCalibration,
+    pub processing: ProcessingSettings,
 }
 
 #[cfg(test)]
