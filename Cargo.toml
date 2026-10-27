@@ -25,16 +25,25 @@ egui = { version = "0.37", default-features = false, features = ["monochrome_emo
 env_logger = "0.11"
 log = "0.4"
 mdns-sd = "0.21"
-ort = { version = "2.0.0-rc.15" }
+# The defaults minus the TLS backend that downloads ONNX Runtime at build time, which is set
+# per system below: rustls on Linux, so building there needs no OpenSSL.
+ort = { version = "2.0.0-rc.15", default-features = false, features = [
+    "std",
+    "ndarray",
+    "tracing",
+    "download-binaries",
+    "copy-dylibs",
+    "api-31",
+] }
 parking_lot = "0.13"
 rosc = "0.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 rfd = "0.17"
 ureq = "3.5"
-zip = { version = "9.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
+ort = { version = "2.0.0-rc.15", features = ["tls-native"] }
 raw-window-handle = "0.6"
 tray-icon = { version = "0.24", default-features = false }
 windows = { version = "0.62", features = [
@@ -50,9 +59,19 @@ windows = { version = "0.62", features = [
     "Win32_UI_Controls",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# The updater installs the release zip.
+zip = { version = "9.1", default-features = false, features = ["deflate"] }
 
 [target.'cfg(not(windows))'.dependencies]
+ort = { version = "2.0.0-rc.15", default-features = false, features = ["tls-rustls"] }
 nokhwa = { version = "0.10", features = ["input-native"] }
+# The updater installs the release tarball, which keeps the executable bit.
+flate2 = "1.1"
+tar = "0.4"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# winit needs a window system on Linux, and eframe's defaults are off above.
+eframe = { version = "0.37", default-features = false, features = ["wayland", "x11"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

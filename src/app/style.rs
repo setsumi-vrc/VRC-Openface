@@ -1,5 +1,7 @@
 //! Fonts, the egui style built from the palette, and the images loaded at start.
 
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -31,13 +33,78 @@ pub(super) fn load_png(ctx: &egui::Context, name: &str, png: &[u8]) -> Option<Te
     Some(ctx.load_texture(name, image, TextureOptions::LINEAR))
 }
 
-/// Loads the interface fonts: Segoe UI (regular and semibold, found on every Windows) for the
-/// Latin and Cyrillic text, and Windows' CJK fonts as fallbacks so every language renders. For
-/// Japanese, Korean and Chinese the CJK font of that language goes first: Han glyphs differ and
-/// sit on different baselines between fonts, so mixing them within one line looks broken.
+/// Font files by role, the first one found wins, with the face to use in a collection.
+#[cfg(windows)]
+mod font_files {
+    pub const UI: &[(&str, u32)] = &[("segoeui.ttf", 0)];
+    pub const UI_SEMIBOLD: &[(&str, u32)] = &[("seguisb.ttf", 0)];
+    pub const JAPANESE: &[(&str, u32)] = &[("YuGothM.ttc", 0), ("msgothic.ttc", 0)];
+    pub const KOREAN: &[(&str, u32)] = &[("malgun.ttf", 0)];
+    pub const CHINESE: &[(&str, u32)] = &[("msyh.ttc", 0)];
+}
+
+/// Noto (Sans and Sans CJK) and DejaVu, which most distributions install. The CJK collection
+/// holds Japanese, Korean and Simplified Chinese as faces 0, 1 and 2.
+#[cfg(not(windows))]
+mod font_files {
+    pub const UI: &[(&str, u32)] = &[("NotoSans-Regular.ttf", 0), ("DejaVuSans.ttf", 0)];
+    pub const UI_SEMIBOLD: &[(&str, u32)] =
+        &[("NotoSans-SemiBold.ttf", 0), ("NotoSans-Medium.ttf", 0), ("DejaVuSans-Bold.ttf", 0)];
+    pub const JAPANESE: &[(&str, u32)] =
+        &[("NotoSansCJK-Regular.ttc", 0), ("NotoSansCJKjp-Regular.otf", 0), ("NotoSansJP-Regular.otf", 0)];
+    pub const KOREAN: &[(&str, u32)] =
+        &[("NotoSansCJK-Regular.ttc", 1), ("NotoSansCJKkr-Regular.otf", 0), ("NotoSansKR-Regular.otf", 0)];
+    pub const CHINESE: &[(&str, u32)] = &[
+        ("NotoSansCJK-Regular.ttc", 2),
+        ("NotoSansCJKsc-Regular.otf", 0),
+        ("NotoSansSC-Regular.otf", 0),
+        ("wqy-microhei.ttc", 0),
+    ];
+}
+
+/// Every font file in the system's font folders by file name. Windows keeps them in one
+/// folder; Linux spreads them over package subfolders of several roots.
+fn font_paths() -> HashMap<OsString, PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(windir) = std::env::var_os("WINDIR") {
+        roots.push(PathBuf::from(windir).join("Fonts"));
+    }
+    if cfg!(not(windows)) {
+        roots.extend(["/usr/share/fonts", "/usr/local/share/fonts"].map(PathBuf::from));
+        let data_home = std::env::var_os("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share")));
+        roots.extend(data_home.map(|d| d.join("fonts")));
+        roots.extend(std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".fonts")));
+    }
+    let mut found = HashMap::new();
+    while let Some(dir) = roots.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                roots.push(path);
+            } else {
+                found.entry(entry.file_name()).or_insert(path);
+            }
+        }
+    }
+    found
+}
+
+/// Loads the interface fonts: Segoe UI (regular and semibold, found on every Windows; Noto Sans
+/// or DejaVu elsewhere) for the Latin and Cyrillic text, and the system's CJK fonts as fallbacks
+/// so every language renders. For Japanese, Korean and Chinese the CJK font of that language goes
+/// first: Han glyphs differ and sit on different baselines between fonts, so mixing them within
+/// one line looks broken.
 pub(super) fn load_fonts(ctx: &egui::Context, language: Language) {
-    let fonts = std::env::var_os("WINDIR").map(|w| PathBuf::from(w).join("Fonts")).unwrap_or_default();
-    let load = |files: &[&str]| files.iter().find_map(|f| std::fs::read(fonts.join(f)).ok());
+    let paths = font_paths();
+    let load = |files: &[(&str, u32)]| {
+        files.iter().find_map(|&(name, index)| {
+            let bytes = std::fs::read(paths.get(OsStr::new(name))?).ok()?;
+            Some(egui::FontData { index, ..egui::FontData::from_owned(bytes) })
+        })
+    };
     let preferred = match language {
         Language::Ja => "japanese",
         Language::Ko => "korean",
@@ -45,9 +112,9 @@ pub(super) fn load_fonts(ctx: &egui::Context, language: Language) {
         _ => "",
     };
     let mut candidates = [
-        ("japanese", load(&["YuGothM.ttc", "msgothic.ttc"])),
-        ("korean", load(&["malgun.ttf"])),
-        ("chinese", load(&["msyh.ttc"])),
+        ("japanese", load(font_files::JAPANESE)),
+        ("korean", load(font_files::KOREAN)),
+        ("chinese", load(font_files::CHINESE)),
     ];
     candidates.sort_by_key(|(name, _)| *name != preferred);
     let mut definitions = egui::FontDefinitions::default();
@@ -58,15 +125,15 @@ pub(super) fn load_fonts(ctx: &egui::Context, language: Language) {
         (defaults(&FontFamily::Proportional, &definitions), defaults(&FontFamily::Monospace, &definitions));
 
     let mut cjk = Vec::new();
-    for (name, bytes) in candidates {
-        let Some(bytes) = bytes else { continue };
-        definitions.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+    for (name, font) in candidates {
+        let Some(font) = font else { continue };
+        definitions.font_data.insert(name.into(), Arc::new(font));
         cjk.push(name.to_string());
     }
     let mut ui_fonts = Vec::new();
-    for (name, files) in [("ui", ["segoeui.ttf"]), ("ui-semibold", ["seguisb.ttf"])] {
-        if let Some(bytes) = load(&files) {
-            definitions.font_data.insert(name.into(), Arc::new(egui::FontData::from_owned(bytes)));
+    for (name, files) in [("ui", font_files::UI), ("ui-semibold", font_files::UI_SEMIBOLD)] {
+        if let Some(font) = load(files) {
+            definitions.font_data.insert(name.into(), Arc::new(font));
             ui_fonts.push(name);
         }
     }

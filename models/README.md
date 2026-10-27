@@ -22,8 +22,9 @@ for intended use and limitations.
 
 No tongue model is included. Use **Import tongue model…** (Settings, or the hint in the
 MediaPipe panel when Tongue is on) to pick a compatible ONNX file. It is copied to
-`%APPDATA%\VRC-Openface\config\models\tongue_model.onnx`, and a `models/tongue_model.onnx`
-next to the executable also works. A compatible model has:
+`%APPDATA%\VRC-Openface\config\models\tongue_model.onnx` (on Linux,
+`~/.config/vrc-openface/models/tongue_model.onnx`), and a `models/tongue_model.onnx` next to
+the executable also works. A compatible model has:
 
 - input `[1, C, S, S]` float: a square crop of the mouth, turned with the mouth corners and
   reaching below the lower lip, with C = 1 (luma) or 3 (RGB) planes in [0, 1]. S is read from

@@ -1,23 +1,29 @@
 //! Update check and install from this repository's GitHub releases.
 //!
-//! Installing downloads the release zip, renames files that are in use (the running
-//! exe and DLLs) to `*.old`, writes the new files next to the executable and restarts.
-//! Leftover `*.old` files are removed on the next start. If writing fails part way, the
-//! previous files are put back.
+//! Installing downloads the release archive for this system (the zip on Windows, the
+//! `-linux-x86_64.tar.gz` on Linux), renames files that are in use (the running exe and
+//! DLLs) to `*.old`, writes the new files next to the executable and restarts. Leftover
+//! `*.old` files are removed on the next start. If writing fails part way, the previous
+//! files are put back.
 
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fs;
-use std::io::{self, Cursor, Read};
+use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zip::ZipArchive;
 
 const USER_AGENT: &str = "vrc-openface-updater";
+
+/// How this system's download ends. Versions up to 0.7.0 install the first `.zip` of a
+/// release, so other systems' archives must not be zips.
+fn asset_suffix() -> String {
+    if cfg!(windows) { ".zip".into() } else { format!("-{}-{}.tar.gz", std::env::consts::OS, std::env::consts::ARCH) }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Channel {
@@ -30,7 +36,8 @@ pub enum Channel {
 pub struct Release {
     pub tag: String,
     pub prerelease: bool,
-    pub zip_url: Option<String>,
+    /// The archive for this system, if the release has one.
+    pub download_url: Option<String>,
     pub page: String,
 }
 
@@ -67,18 +74,19 @@ pub fn check() -> Result<Vec<Release>> {
         .body_mut()
         .read_to_string()?;
     let list: Vec<Value> = serde_json::from_str(&text)?;
+    let suffix = asset_suffix();
     Ok(list
         .iter()
         .filter(|r| !r.get("draft").and_then(Value::as_bool).unwrap_or(false))
         .filter_map(|r| {
-            let zip_url = r.get("assets")?.as_array()?.iter().find_map(|a| {
+            let download_url = r.get("assets")?.as_array()?.iter().find_map(|a| {
                 let name = a.get("name")?.as_str()?;
-                name.ends_with(".zip").then(|| a.get("browser_download_url")?.as_str().map(str::to_string))?
+                name.ends_with(&suffix).then(|| a.get("browser_download_url")?.as_str().map(str::to_string))?
             });
             Some(Release {
                 tag: r.get("tag_name")?.as_str()?.to_string(),
                 prerelease: r.get("prerelease").and_then(Value::as_bool).unwrap_or(false),
-                zip_url,
+                download_url,
                 page: r.get("html_url")?.as_str()?.to_string(),
             })
         })
@@ -123,7 +131,7 @@ fn install_dir() -> Result<PathBuf> {
 }
 
 pub fn install(release: &Release) -> Result<()> {
-    let url = release.zip_url.as_deref().context("this release has no zip download")?;
+    let url = release.download_url.as_deref().context("this release has no download for this system")?;
     let mut bytes = Vec::new();
     agent()
         .get(url)
@@ -134,26 +142,75 @@ pub fn install(release: &Release) -> Result<()> {
         .limit(512 * 1024 * 1024)
         .reader()
         .read_to_end(&mut bytes)?;
-    let mut archive = ZipArchive::new(Cursor::new(bytes))?;
+    let mut files = unpack(bytes)?;
 
-    // Release zips may wrap everything in one top-level folder; strip it.
-    let names: Vec<String> = archive.file_names().map(|n| n.map(|n| n.into_owned())).collect::<Result<_, _>>()?;
-    let prefix = names
-        .first()
-        .and_then(|n| n.split_once('/').map(|(p, _)| format!("{p}/")))
-        .filter(|p| names.iter().all(|n| n.starts_with(p.as_str())))
-        .unwrap_or_default();
-    let exe_name = std::env::current_exe()?.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    if !names.iter().any(|n| Path::new(n).file_name().is_some_and(|f| f.to_string_lossy() == exe_name)) {
-        bail!("the release zip does not contain {exe_name}");
+    // Release archives may wrap everything in one top-level folder; strip it.
+    let top = files.first().and_then(|f| f.path.iter().next()).map(PathBuf::from);
+    if let Some(top) = top.filter(|top| files.iter().all(|f| f.path.starts_with(top) && f.path != *top)) {
+        for file in &mut files {
+            file.path = file.path.strip_prefix(&top).map(Path::to_path_buf).unwrap_or_default();
+        }
+    }
+    // Taken before the files move: on Linux the running executable's path follows the rename.
+    let exe = std::env::current_exe()?;
+    let exe_name = exe.file_name().unwrap_or_default();
+    if !files.iter().any(|f| f.path.file_name() == Some(exe_name)) {
+        bail!("the release archive does not contain {}", exe_name.display());
     }
 
     let mut changed = Vec::new();
-    if let Err(e) = extract(&mut archive, &prefix, &install_dir()?, &mut changed) {
+    if let Err(e) = extract(&files, &install_dir()?, &mut changed) {
         rollback(changed);
         return Err(e);
     }
-    restart()
+    relaunch(&exe)
+}
+
+/// One file of a release archive, relative to the install folder.
+struct Packed {
+    path: PathBuf,
+    data: Vec<u8>,
+    /// Permission bits, so the executable stays executable.
+    #[cfg(unix)]
+    mode: u32,
+}
+
+#[cfg(windows)]
+fn unpack(bytes: Vec<u8>) -> Result<Vec<Packed>> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(bytes))?;
+    let mut files = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive.by_index(i)?;
+        let Some(path) = entry.enclosed_name().filter(|_| !entry.is_dir()) else { continue };
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).with_context(|| format!("reading {}", path.display()))?;
+        files.push(Packed { path, data });
+    }
+    Ok(files)
+}
+
+#[cfg(unix)]
+fn unpack(bytes: Vec<u8>) -> Result<Vec<Packed>> {
+    use std::path::Component;
+
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(Cursor::new(bytes)));
+    let mut files = Vec::new();
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry.path()?.into_owned();
+        // Nothing may land outside the install folder.
+        if !path.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir)) {
+            continue;
+        }
+        let mode = entry.header().mode()?;
+        let mut data = Vec::new();
+        entry.read_to_end(&mut data).with_context(|| format!("reading {}", path.display()))?;
+        files.push(Packed { path, data, mode });
+    }
+    Ok(files)
 }
 
 /// Where a file in use is moved to while its replacement is written.
@@ -163,21 +220,11 @@ fn old_path(path: &Path) -> PathBuf {
     old.into()
 }
 
-/// Writes every file of the archive under `dir`, moving the files in the way to `*.old`.
-/// `changed` gets each written file and where its previous version went, for [`rollback`].
-fn extract(
-    archive: &mut ZipArchive<Cursor<Vec<u8>>>,
-    prefix: &str,
-    dir: &Path,
-    changed: &mut Vec<(PathBuf, Option<PathBuf>)>,
-) -> Result<()> {
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i)?;
-        if entry.is_dir() {
-            continue;
-        }
-        let Some(relative) = entry.enclosed_name() else { continue };
-        let target = dir.join(relative.strip_prefix(prefix).unwrap_or(&relative));
+/// Writes `files` under `dir`, moving the files in the way to `*.old`. `changed` gets each
+/// written file and where its previous version went, for [`rollback`].
+fn extract(files: &[Packed], dir: &Path, changed: &mut Vec<(PathBuf, Option<PathBuf>)>) -> Result<()> {
+    for file in files {
+        let target = dir.join(&file.path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -187,8 +234,13 @@ fn extract(
             fs::rename(&target, old).with_context(|| format!("replacing {}", target.display()))?;
         }
         changed.push((target.clone(), old));
-        let mut file = fs::File::create(&target).with_context(|| format!("writing {}", target.display()))?;
-        io::copy(&mut entry, &mut file).with_context(|| format!("writing {}", target.display()))?;
+        fs::write(&target, &file.data).with_context(|| format!("writing {}", target.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&target, fs::Permissions::from_mode(file.mode & 0o777))
+                .with_context(|| format!("writing {}", target.display()))?;
+        }
     }
     Ok(())
 }
@@ -206,7 +258,11 @@ fn rollback(changed: Vec<(PathBuf, Option<PathBuf>)>) {
 }
 
 pub fn restart() -> Result<()> {
-    std::process::Command::new(std::env::current_exe()?).spawn()?;
+    relaunch(&std::env::current_exe()?)
+}
+
+fn relaunch(exe: &Path) -> Result<()> {
+    std::process::Command::new(exe).spawn()?;
     std::process::exit(0);
 }
 
@@ -251,6 +307,27 @@ mod tests {
     fn old_files_keep_the_whole_name() {
         assert_eq!(old_path(Path::new("a/vrc-openface.exe")), Path::new("a/vrc-openface.exe.old"));
         assert_eq!(old_path(Path::new("LICENSE")), Path::new("LICENSE.old"));
+    }
+
+    #[test]
+    fn only_windows_downloads_a_zip() {
+        // Versions up to 0.7.0 install the first zip they find, whatever system it is for.
+        assert_eq!(asset_suffix().ends_with(".zip"), cfg!(windows));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tarballs_keep_the_executable_bit() {
+        let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast()));
+        let mut header = tar::Header::new_gnu();
+        header.set_size(2);
+        header.set_mode(0o755);
+        builder.append_data(&mut header, "VRC-Openface-1.0.0/vrc-openface", &b"#!"[..]).unwrap();
+        let files = unpack(builder.into_inner().unwrap().finish().unwrap()).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, Path::new("VRC-Openface-1.0.0/vrc-openface"));
+        assert_eq!(files[0].mode & 0o777, 0o755);
+        assert_eq!(files[0].data, b"#!");
     }
 
     #[test]

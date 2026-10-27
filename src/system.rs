@@ -55,13 +55,25 @@ pub fn process_memory() -> Option<crate::perf::MemorySample> {
     Some(crate::perf::MemorySample { private: counters.PrivateUsage as u64, working: counters.WorkingSetSize as u64 })
 }
 
-#[cfg(not(windows))]
+/// Anonymous (private) and total resident memory from `/proc/self/status`.
+#[cfg(target_os = "linux")]
+pub fn process_memory() -> Option<crate::perf::MemorySample> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    let kib = |key: &str| {
+        let line = status.lines().find_map(|l| l.strip_prefix(key))?;
+        line.trim().trim_end_matches("kB").trim().parse::<u64>().ok().map(|k| k * 1024)
+    };
+    Some(crate::perf::MemorySample { private: kib("RssAnon:")?, working: kib("VmRSS:")? })
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn process_memory() -> Option<crate::perf::MemorySample> {
     None
 }
 
 /// Raises the system timer resolution to 1 ms for the life of the process so short
-/// sleeps in the output loop are accurate (the Windows default is ~15.6 ms).
+/// sleeps in the output loop are accurate (the Windows default is ~15.6 ms; Linux sleeps
+/// are already that precise).
 #[cfg(windows)]
 pub fn high_resolution_timer() {
     unsafe {

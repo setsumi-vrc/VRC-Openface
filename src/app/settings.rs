@@ -91,7 +91,10 @@ impl App {
                 let (to_tray, to_tray_hint) = (self.t(s, "close_to_tray"), self.t(s, "close_to_tray_hint"));
                 let debug = self.t(s, "debug_performance");
                 self.labeled_switch(ui, &mut s.friendly_names, friendly, None);
-                self.labeled_switch(ui, &mut s.close_to_tray, to_tray, Some(to_tray_hint));
+                // Only Windows has a tray icon to close to.
+                if self.tray.is_some() {
+                    self.labeled_switch(ui, &mut s.close_to_tray, to_tray, Some(to_tray_hint));
+                }
                 self.labeled_switch(ui, &mut s.debug, debug, None);
 
                 self.section(ui, self.t(s, "camera"));
@@ -390,7 +393,7 @@ impl App {
             } else {
                 let newer = updater::is_newer(release.version(), env!("CARGO_PKG_VERSION"));
                 let key = if newer { "update_now" } else { "install_restart" };
-                if ui.add_enabled(release.zip_url.is_some(), egui::Button::new(self.t(s, key))).clicked() {
+                if ui.add_enabled(release.download_url.is_some(), egui::Button::new(self.t(s, key))).clicked() {
                     install = Some((*release).clone());
                 }
             }

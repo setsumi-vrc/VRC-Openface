@@ -12,7 +12,11 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+### Added
+- **Linux** (x86_64): a `VRC-Openface-x.y.z-linux-x86_64.tar.gz` download with the same app, first published with 0.7.0. It runs on the CPU (DirectML is Windows only), opens the camera through V4L2, uses the Noto (Sans and Sans CJK) or DejaVu fonts, reads avatar configs from VRChat's Proton prefix, and updates itself from that archive. Linux has no tray icon, so the close-to-tray switch is hidden there.
+
 ### Changed
+- The updater picks the download for its own system. Other systems' archives are never zips, so versions up to 0.7.0 (which take the first zip of a release) stay on the Windows one.
 - The README is reorganized, up to date with the current interface, and explains how to let several apps use the camera at once.
 
 ## [0.7.0] - 2026-10-26

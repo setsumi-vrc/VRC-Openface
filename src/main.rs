@@ -47,6 +47,8 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: viewport
             .with_title("VRC Openface")
+            // Wayland takes the window icon from the desktop entry with this name.
+            .with_app_id("vrc-openface")
             // The top bar draws its own window controls.
             .with_decorations(false)
             .with_inner_size([1480.0, 940.0])

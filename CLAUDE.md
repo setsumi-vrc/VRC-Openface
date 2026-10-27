@@ -7,6 +7,7 @@ Guidance for working on VRC Openface: webcam face tracking for VRChat in Rust
 
 ```sh
 cargo build --release                         # DirectML on by default; --no-default-features for CPU only
+cargo build --release --no-default-features   # Linux (DirectML is Windows only); V4L2 bindings need libclang
 cargo test                                    # mapping, calibration, OSC binding, parsers, interpolation
 cargo clippy --all-targets                    # keep at zero warnings
 cargo fmt                                     # rustfmt.toml: max_width 120
@@ -102,7 +103,7 @@ image (mean blendshape difference ≈ 0.01 when this was written).
 
 Windows uses Media Foundation directly: it ranks native modes (fps ≥ requested, then
 closest area, then MJPG > NV12 > YUY2) and asks the source reader for RGB32, scaled to
-the requested width when the camera only offers large modes. nokhwa is used only on
+the requested width when the camera only offers large modes. nokhwa (V4L2 on Linux) is used only on
 other platforms; its MSMF backend misreported modes and delivered about 12 FPS on a Brio 500.
 
 ### Interface details (`app/`)
@@ -125,7 +126,9 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
 - Controls come from `ui/widgets.rs` (`button`, `icon_button`, `chip`, `pill`, `card`); icons are
   drawn by `ui/icons.rs` on a 24 x 24 grid. Do not put glyph characters (arrows, check marks, emoji)
   in UI text: Segoe UI lacks them and they show as boxes. Add a `Glyph` instead.
-- Fonts: `load_fonts` puts Segoe UI first (and its semibold as the `semibold` family) for
+- Fonts: `font_files` lists the files per role and system (Windows fonts; Noto Sans, Noto Sans CJK
+  (one `.ttc`, faces 0/1/2 = JA/KO/SC) or DejaVu on Linux), found by name under the font folders
+  (`font_paths`). `load_fonts` puts Segoe UI first (and its semibold as the `semibold` family) for
   non-CJK languages; Japanese, Korean and Chinese put their own CJK font first. A language's own
   name uses `native_font` so its text stays in one font.
 - Panel style: rounded cards (`panel_frame`), 30 px rows with a 3 px value bar under the name
@@ -155,12 +158,12 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
 
 `config.rs` (Settings, data dir, JSON persistence via write-then-rename), `i18n/`
 (`mod.rs` holds EN/JA/KO, one file per other language; `tr` looks texts up in a table built once;
-CJK glyphs come from Windows fonts loaded in `app/style.rs`, the selected language's font first),
+CJK glyphs come from system fonts loaded in `app/style.rs`, the selected language's font first),
 `ui/theme.rs` (color schemes), `updater.rs` (GitHub releases of this repo; install renames
 files in use to `*.old`, writes new ones and restarts, and puts the old files back if writing
 fails; the next start removes `*.old` only in the exe folder and `models/`, and only next to
 the file that replaced it; versions compare as SemVer, a pre-release below its release),
-`system.rs` (DXGI adapters =
+`system.rs` (process memory from `/proc` on Linux; DXGI adapters =
 DirectML device ids, private memory, timer resolution).
 
 ## Conventions
@@ -177,5 +180,11 @@ DirectML device ids, private memory, timer resolution).
   settings, calibrations or avatar setups. Record every change under `[Unreleased]` in
   `CHANGELOG.md`; on release, rename that section to the version and date, bump
   `Cargo.toml`, tag `vX.Y.Z` and use the section as the release notes.
+- Linux: no tray (`Tray::new` returns `None`, which also hides the close-to-tray switch), CPU only,
+  avatar configs under VRChat's Proton prefix (`osc_roots`), `/proc` for memory.
 - Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/` (the three face models
-  and its README), `README.md` and `LICENSE`; the updater requires the exe in the zip.
+  and its README), `README.md` and `LICENSE`; the updater requires the exe in the zip. The Linux release is
+  `VRC-Openface-X.Y.Z-linux-x86_64.tar.gz` with one `VRC-Openface-X.Y.Z/` folder holding
+  `vrc-openface`, `models/`, `README.md` and `LICENSE` (never a zip: versions up to 0.7.0 install
+  the first zip of a release). ONNX Runtime's prebuilt library sets the oldest system it runs on
+  (glibc 2.38, GCC 13's libstdc++), so building on an older distribution does not lower it.

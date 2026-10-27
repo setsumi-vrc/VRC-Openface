@@ -6,13 +6,13 @@
 
 <p align="center">
   <b>Webcam face tracking for VRChat.</b><br>
-  One small Windows app: your webcam in, your avatar's face out. No VRCFaceTracking, no Python, no OpenCV.
+  One small app for Windows and Linux: your webcam in, your avatar's face out. No VRCFaceTracking, no Python, no OpenCV.
 </p>
 
 <p align="center">
   <a href="https://github.com/setsumi-vrc/VRC-Openface/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/setsumi-vrc/VRC-Openface?style=flat-square&color=ffaa3c"></a>
   <a href="https://github.com/setsumi-vrc/VRC-Openface/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/setsumi-vrc/VRC-Openface/total?style=flat-square&color=62cc8c"></a>
-  <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-5aaaff?style=flat-square">
+  <img alt="Windows and Linux" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-5aaaff?style=flat-square">
   <img alt="Rust" src="https://img.shields.io/badge/made%20with-Rust-dea584?style=flat-square">
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-b28cff?style=flat-square"></a>
 </p>
@@ -28,7 +28,7 @@
 ---
 
 VRC Openface runs Google's MediaPipe face landmarker on ONNX Runtime (on your GPU through
-DirectML, or on the CPU), turns its 52 blendshapes into
+DirectML on Windows, or on the CPU), turns its 52 blendshapes into
 [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) **Unified Expressions** and
 sends them to VRChat over OSC, 100 times a second.
 
@@ -47,15 +47,45 @@ sends them to VRChat over OSC, 100 times a second.
 
 ### 1. Install
 
-1. Download the latest `VRC-Openface-x.y.z.zip` from
-   [**Releases**](https://github.com/setsumi-vrc/VRC-Openface/releases/latest).
-2. Extract it anywhere and run `vrc-openface.exe`.
-   Keep the `models` folder and `DirectML.dll` next to the executable.
+Download the latest release from
+[**Releases**](https://github.com/setsumi-vrc/VRC-Openface/releases/latest), then:
 
-Later versions install from **Settings → Updates**, inside the app.
+<details open>
+<summary><b>Windows</b></summary>
+
+1. Download `VRC-Openface-x.y.z.zip`, extract it anywhere and run `vrc-openface.exe`.
+2. Keep the `models` folder and `DirectML.dll` next to the executable.
 
 > [!NOTE]
 > The app needs the Microsoft Visual C++ 2015–2022 Redistributable (x64), which most Windows PCs already have.
+
+</details>
+
+<details open>
+<summary><b>Linux</b></summary>
+
+1. Download `VRC-Openface-x.y.z-linux-x86_64.tar.gz` and extract it:
+
+   ```sh
+   tar xzf VRC-Openface-*-linux-x86_64.tar.gz
+   ./VRC-Openface-*/vrc-openface
+   ```
+
+2. Keep the `models` folder next to the executable.
+
+- Works on X11 and Wayland, on distributions with glibc 2.38 or newer (Ubuntu 24.04+,
+  Debian 13+, Fedora 39+, Arch and the distributions based on them).
+- Tracking runs on the CPU; GPU inference (DirectML) is Windows only. The face models are small,
+  so a recent CPU keeps up with a 30 FPS camera.
+- The camera is opened through V4L2 (`/dev/video*`). If it is not listed, add yourself to the
+  `video` group (`sudo usermod -aG video $USER`, then log in again).
+- Japanese, Korean and Chinese text needs the Noto Sans CJK fonts (`fonts-noto-cjk` on
+  Debian and Ubuntu, `noto-fonts-cjk` on Arch and Fedora).
+- There is no tray icon on Linux: closing the window quits the app.
+
+</details>
+
+Later versions install from **Settings → Updates**, inside the app, on both systems.
 
 ### 2. Let several apps use the camera
 
@@ -69,10 +99,14 @@ Later versions install from **Settings → Updates**, inside the app.
 >
 > This option is part of recent Windows 11 versions. Without it, close the other apps that use
 > the camera before starting VRC Openface.
+>
+> On Linux most cameras also serve one app at a time: close the other apps that use the camera
+> first.
 
 ### 3. Connect to VRChat
 
-1. **Enable OSC in VRChat**: Action menu → Options → OSC → **Enabled**.
+1. **Enable OSC in VRChat**: Action menu → Options → OSC → **Enabled**. On Linux this works the
+   same with VRChat running through Steam's Proton.
 2. **Pick your camera** in VRC Openface. The dots of the face mesh should follow your face.
 3. **Calibrate**:
    - Relaxed face, eyes open, looking straight ahead → **Capture neutral**.
@@ -91,8 +125,8 @@ closing the window keeps tracking running in the system tray.
 <summary><b>Tracking</b></summary>
 
 - MediaPipe face detection, 478-point face mesh and 52 blendshapes at the camera frame rate.
-- GPU inference through DirectML, with an automatic fallback to the CPU. Face and tongue can run
-  on different devices.
+- GPU inference through DirectML on Windows, with an automatic fallback to the CPU. Face and
+  tongue can run on different devices. Linux runs on the CPU.
 - **Tongue tracking** with an imported ONNX model ([details](models/README.md)).
 - A geometric (mesh) frown estimate, because the model's own frown score rarely moves.
 
@@ -109,7 +143,7 @@ closing the window keeps tracking running in the system tray.
 - A parameter that exists both as a float and as binary bools (`Name1/2/4/8…` + `NameNegative`)
   gets both: the float for you, the bits for everyone else.
 - **Avatar aware**: reads the current avatar's name and parameters from VRChat's OSCQuery
-  service, its local avatar files and `/avatar/change`. Without any of them, every parameter is
+  service, its local avatar files (on Linux, inside VRChat's Proton prefix) and `/avatar/change`. Without any of them, every parameter is
   sent as an `FT/v2/<Name>` float (Settings can turn this off).
 - **Cat ears** 🐱: drives `EarLeft` / `EarRight` (v2, −1…1) from your brows. Raised brows perk
   them up, lowered brows fold them back. Add those float parameters to your avatar to use it.
@@ -138,7 +172,7 @@ closing the window keeps tracking running in the system tray.
   row to see what it feeds and what feeds it.
 - Camera preview blurred by default; rest the pointer on it to reveal it for 5 minutes.
 - Color schemes, including your own colors, and interface scaling.
-- System tray icon with a status dot, plus Open, Pause and Quit.
+- System tray icon with a status dot, plus Open, Pause and Quit (Windows).
 - Sleeps when idle, updates itself from GitHub releases, and has a debug window with latency,
   memory and timing per stage.
 
@@ -174,7 +208,8 @@ result as a profile to reuse it.
 
 ## 📁 Your data
 
-Settings, calibrations, profiles and imported models live in `%APPDATA%\VRC-Openface\config`.
+Settings, calibrations, profiles and imported models live in `%APPDATA%\VRC-Openface\config` on
+Windows and in `~/.config/vrc-openface` on Linux.
 **Settings → Data → Erase all app data** removes them. Nothing is sent anywhere except OSC to
 VRChat and the update check on GitHub.
 
@@ -183,12 +218,15 @@ VRChat and the update check on GitHub.
 Requires **Rust 1.95** or newer.
 
 ```sh
-cargo build --release                         # with DirectML GPU support (default)
-cargo build --release --no-default-features   # CPU only
+cargo build --release                         # Windows, with DirectML GPU support (default)
+cargo build --release --no-default-features   # CPU only; the only build on Linux
 ```
 
-The `ort` crate downloads the ONNX Runtime binaries at build time. To ship a build, copy
-`target/release/vrc-openface.exe`, `target/release/DirectML.dll` and the `models/` folder.
+The `ort` crate downloads the ONNX Runtime binaries at build time. On Linux the camera bindings
+also need `libclang` (`libclang-dev` on Debian and Ubuntu).
+
+To ship a build, copy the `models/` folder with `target/release/vrc-openface.exe` and
+`target/release/DirectML.dll` (Windows) or `target/release/vrc-openface` (Linux).
 
 <details>
 <summary><b>Development commands</b></summary>

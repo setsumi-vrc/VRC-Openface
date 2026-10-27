@@ -17,9 +17,22 @@ use serde_json::Value;
 use crate::vrchat::osc::{AvatarInfo, AvatarParam, ParamType};
 
 /// `%USERPROFILE%\AppData\LocalLow\VRChat\VRChat\OSC`.
-fn osc_root() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(home).join("AppData").join("LocalLow").join("VRChat").join("VRChat").join("OSC"))
+#[cfg(windows)]
+fn osc_roots() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("USERPROFILE") else { return Vec::new() };
+    vec![PathBuf::from(home).join(r"AppData\LocalLow\VRChat\VRChat\OSC")]
+}
+
+/// On Linux VRChat runs in Proton, so the same folder sits inside its Wine prefix
+/// (Steam app 438100), under a native or a Flatpak Steam.
+#[cfg(not(windows))]
+fn osc_roots() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Vec::new() };
+    let prefix = "steamapps/compatdata/438100/pfx/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/OSC";
+    [".local/share/Steam", ".steam/steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"]
+        .iter()
+        .map(|steam| home.join(steam).join(prefix))
+        .collect()
 }
 
 /// Reads the newest config VRChat wrote for `avatar_id` across all local users.
@@ -27,9 +40,10 @@ pub fn load_config(avatar_id: &str) -> Option<AvatarInfo> {
     if !avatar_id.starts_with("avtr_") || avatar_id.contains(['/', '\\', '.']) {
         return None;
     }
-    let root = osc_root()?;
-    let newest = fs::read_dir(root)
-        .ok()?
+    let newest = osc_roots()
+        .into_iter()
+        .filter_map(|root| fs::read_dir(root).ok())
+        .flatten()
         .flatten()
         .map(|user| user.path().join("Avatars").join(format!("{avatar_id}.json")))
         .filter_map(|path| Some((fs::metadata(&path).ok()?.modified().unwrap_or(SystemTime::UNIX_EPOCH), path)))
