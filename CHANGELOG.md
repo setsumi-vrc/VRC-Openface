@@ -12,6 +12,9 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+### Changed
+- The README is reorganized, up to date with the current interface, and explains how to let several apps use the camera at once.
+
 ## [0.7.0] - 2026-10-26
 
 ### Fixed
