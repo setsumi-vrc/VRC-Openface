@@ -10,19 +10,19 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::{Mutex, RwLock};
 
-use crate::avatar::{self, SharedReceiver};
 use crate::camera::CameraSource;
 use crate::channels::{self, COUNT};
 use crate::config::{self, Device, Settings};
 use crate::face::{self, FaceLandmarker, TongueModel};
 use crate::image::RgbFrame;
 use crate::mapping::{Mapper, OUTPUTS};
-use crate::osc::{self, AvatarInfo, Binding};
-use crate::oscquery::SharedDiscovery;
-use crate::output::{Frame, SharedFeed};
-use crate::perf::{FrameTimes, Perf, Stage};
+use crate::perf::{FrameTimes, Perf, Stage, ms_since as ms};
 use crate::processing::{CalibrationStore, CaptureOutcome, Processor};
 use crate::system::{self, GpuAdapter};
+use crate::vrchat::avatar::{self, SharedReceiver};
+use crate::vrchat::osc::{self, AvatarInfo, Bindings};
+use crate::vrchat::oscquery::SharedDiscovery;
+use crate::vrchat::output::{Frame, SharedFeed};
 
 const PREVIEW_MAX_WIDTH: usize = 640;
 const READ_FAILURE_LIMIT: u32 = 8;
@@ -72,11 +72,11 @@ pub struct Snapshot {
     pub input: [f32; COUNT],
     pub values: [f32; COUNT],
     pub outputs: Vec<f32>,
-    pub bindings: Vec<Option<Binding>>,
+    pub bindings: Bindings,
     pub avatar_id: Option<String>,
     pub avatar_name: Option<String>,
     /// Face tracking parameter names (after `v2/`) the avatar declares.
-    pub avatar_ft_params: Vec<String>,
+    pub avatar_ft_params: Arc<[String]>,
     pub vrchat_found: bool,
     /// The avatar comes from a connected VRChat, not from the last session.
     pub avatar_live: bool,
@@ -102,10 +102,10 @@ impl Default for Snapshot {
             input: [0.0; COUNT],
             values: [0.0; COUNT],
             outputs: vec![0.0; OUTPUTS.len()],
-            bindings: vec![None; OUTPUTS.len()],
+            bindings: vec![None; OUTPUTS.len()].into(),
             avatar_id: None,
             avatar_name: None,
-            avatar_ft_params: Vec::new(),
+            avatar_ft_params: Arc::default(),
             vrchat_found: false,
             avatar_live: false,
             tongue: TongueStatus::Off,
@@ -199,42 +199,41 @@ impl FpsCounter {
     }
 }
 
-fn ms(since: Instant) -> f32 {
-    since.elapsed().as_secs_f32() * 1000.0
-}
-
 /// Auto picks the first hardware GPU; DirectML device ids are DXGI adapter indices.
-fn resolve(device: Device, gpus: &[GpuAdapter]) -> Option<i32> {
+fn resolve(device: Device, gpus: &[GpuAdapter]) -> Option<u32> {
     match device {
         Device::Cpu => None,
-        Device::Gpu(i) => Some(i as i32),
-        Device::Auto if cfg!(feature = "directml") => gpus.first().map(|g| g.index as i32),
+        Device::Gpu(i) => Some(i),
+        Device::Auto if cfg!(feature = "directml") => gpus.first().map(|g| g.index),
         Device::Auto => None,
     }
 }
 
-fn device_label(gpu: Option<i32>, gpus: &[GpuAdapter]) -> String {
-    match gpu {
-        None => "CPU".into(),
-        Some(i) => match gpus.iter().find(|g| g.index as i32 == i) {
-            Some(g) => format!("GPU {i}: {}", g.name),
-            None => format!("GPU {i}"),
-        },
-    }
+fn device_label(gpu: Option<u32>, gpus: &[GpuAdapter]) -> String {
+    gpu.map_or_else(|| "CPU".into(), |i| system::gpu_label(gpus, i))
 }
 
-/// Imported tongue model first, then the models folder. Without either, a build that
-/// compiled one in uses that.
+/// The DirectML device id ONNX Runtime takes.
+fn device_id(gpu: Option<u32>) -> Option<i32> {
+    gpu.and_then(|i| i32::try_from(i).ok())
+}
+
+/// An imported tongue model first, then the one in the models folder with the face models.
 pub fn tongue_path(model_dir: &Path) -> Option<PathBuf> {
     [config::user_model_dir().join(TONGUE_FILE), model_dir.join(TONGUE_FILE)].into_iter().find(|p| p.is_file())
 }
 
+/// What the avatar was last built from: both sources' generations, the avatar id and the
+/// two settings that change the bindings.
+type AvatarKey = (u64, u64, Option<String>, bool, bool);
+
+#[derive(Default)]
 struct Avatar {
-    key: Option<(u64, u64, Option<String>, bool, bool)>,
+    key: Option<AvatarKey>,
     info: AvatarInfo,
-    bindings: Vec<Option<Binding>>,
-    flags: Vec<String>,
-    ft_params: Vec<String>,
+    bindings: Bindings,
+    flags: Arc<[String]>,
+    ft_params: Arc<[String]>,
     vrchat_found: bool,
     live: bool,
 }
@@ -247,9 +246,10 @@ struct Tracker {
     camera: Option<CameraSource>,
     camera_key: Option<(u32, (u32, u32), u32)>,
     landmarker: Option<FaceLandmarker>,
-    face_gpu: Option<Option<i32>>,
+    /// The device the models were loaded for (`None` inside: the CPU), once loaded.
+    face_gpu: Option<Option<u32>>,
     tongue: Option<TongueModel>,
-    tongue_gpu: Option<Option<i32>>,
+    tongue_gpu: Option<Option<u32>>,
     tongue_status: TongueStatus,
     processor: Processor,
     mapper: Mapper,
@@ -259,7 +259,7 @@ struct Tracker {
     camera_fps: FpsCounter,
     tracking_fps: FpsCounter,
     preview_seq: u64,
-    last_memory_sample: Instant,
+    last_memory_sample: Option<Instant>,
 }
 
 impl Tracker {
@@ -278,21 +278,13 @@ impl Tracker {
             tongue_status: TongueStatus::Off,
             processor: Processor::new(),
             mapper: Mapper::new(),
-            avatar: Avatar {
-                key: None,
-                info: AvatarInfo::default(),
-                bindings: Vec::new(),
-                flags: Vec::new(),
-                ft_params: Vec::new(),
-                vrchat_found: false,
-                live: false,
-            },
+            avatar: Avatar::default(),
             started: Instant::now(),
             last_timestamp: 0,
             camera_fps: FpsCounter::new(),
             tracking_fps: FpsCounter::new(),
             preview_seq: 0,
-            last_memory_sample: Instant::now() - Duration::from_secs(10),
+            last_memory_sample: None,
         }
     }
 
@@ -304,26 +296,30 @@ impl Tracker {
         self.shared.snapshot.lock().message = Some((key, Instant::now()));
     }
 
+    /// Key of the current avatar's calibration: its id, or "" while none is known.
+    fn avatar_key(&self) -> String {
+        self.avatar.info.id.clone().unwrap_or_default()
+    }
+
     fn handle_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
-            let key = self.avatar.info.id.clone().unwrap_or_default();
             match command {
                 Command::CaptureNeutral => self.processor.start_neutral_capture(),
                 Command::CenterGaze => self.processor.start_gaze_capture(),
                 Command::UndoNeutral => {
+                    let key = self.avatar_key();
                     if self.shared.calibrations.lock().avatars.entry(key).or_default().undo_neutral() {
                         self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
                     }
                 }
                 Command::ResetGaze => {
+                    let key = self.avatar_key();
                     self.shared.calibrations.lock().avatars.entry(key).or_default().gaze_center = None;
                     self.shared.calibrations_dirty.store(true, Ordering::Relaxed);
                 }
                 Command::ReloadModels => {
                     self.landmarker = None;
-                    self.tongue = None;
-                    self.tongue_gpu = None;
-                    self.tongue_status = TongueStatus::Off;
+                    self.unload_tongue();
                 }
             }
         }
@@ -338,8 +334,8 @@ impl Tracker {
                 log::info!("status: {status:?}");
                 logged = Some(status);
             }
-            if self.last_memory_sample.elapsed() >= Duration::from_secs(5) {
-                self.last_memory_sample = Instant::now();
+            if self.last_memory_sample.is_none_or(|at| at.elapsed() >= Duration::from_secs(5)) {
+                self.last_memory_sample = Some(Instant::now());
                 if let Some(sample) = system::process_memory() {
                     self.shared.perf.lock().sample_memory(sample);
                 }
@@ -377,7 +373,7 @@ impl Tracker {
         if self.landmarker.is_none() || self.face_gpu != Some(face_gpu) {
             self.landmarker = None;
             self.face_gpu = Some(face_gpu);
-            let (landmarker, used) = match FaceLandmarker::load(&self.model_dir, face_gpu) {
+            let (landmarker, used) = match FaceLandmarker::load(&self.model_dir, device_id(face_gpu)) {
                 Ok(l) => (l, face_gpu),
                 Err(e) if face_gpu.is_some() => {
                     log::warn!("GPU face inference unavailable, using CPU: {e:#}");
@@ -396,9 +392,7 @@ impl Tracker {
 
     fn ensure_tongue(&mut self, settings: &Settings) {
         if !settings.tongue {
-            self.tongue = None;
-            self.tongue_gpu = None;
-            self.tongue_status = TongueStatus::Off;
+            self.unload_tongue();
             return;
         }
         let gpu = resolve(settings.tongue_device, &self.shared.gpus);
@@ -407,18 +401,11 @@ impl Tracker {
         }
         self.tongue = None;
         self.tongue_gpu = Some(gpu);
-        let path = tongue_path(&self.model_dir);
-        let load = |gpu: Option<i32>| match &path {
-            Some(path) => TongueModel::load(path, gpu),
-            #[cfg(embedded_tongue)]
-            None => TongueModel::load_embedded(gpu),
-            #[cfg(not(embedded_tongue))]
-            None => unreachable!("checked below"),
-        };
-        if path.is_none() && !cfg!(embedded_tongue) {
+        let Some(path) = tongue_path(&self.model_dir) else {
             self.tongue_status = TongueStatus::Missing;
             return;
-        }
+        };
+        let load = |gpu: Option<u32>| TongueModel::load(&path, device_id(gpu));
         let loaded = load(gpu).map(|m| (m, gpu)).or_else(|e| {
             if gpu.is_none() {
                 return Err(e);
@@ -434,6 +421,12 @@ impl Tracker {
             }
             Err(e) => self.tongue_status = TongueStatus::Error(format!("{e:#}")),
         }
+    }
+
+    fn unload_tongue(&mut self) {
+        self.tongue = None;
+        self.tongue_gpu = None;
+        self.tongue_status = TongueStatus::Off;
     }
 
     /// Merges OSCQuery, `/avatar/change` and VRChat's avatar config files.
@@ -482,16 +475,19 @@ impl Tracker {
                 *binding = None;
             }
         }
-        self.avatar.flags = osc::tracking_flags(&info);
-        self.avatar.ft_params = info
+        self.avatar.flags = osc::tracking_flags(&info).into();
+        // The same rule as binding, so every name listed here is one `bind` could match.
+        let mut ft_params: Vec<String> = info
             .params
             .iter()
-            .filter_map(|p| p.path.rsplit_once("v2/").map(|(_, n)| n.to_string()))
+            .filter_map(|p| osc::v2_name(&p.path))
             .filter(|n| !n.is_empty())
+            .map(String::from)
             .collect();
-        self.avatar.ft_params.sort();
-        self.avatar.ft_params.dedup();
-        self.avatar.bindings = bindings;
+        ft_params.sort_unstable();
+        ft_params.dedup();
+        self.avatar.ft_params = ft_params.into();
+        self.avatar.bindings = bindings.into();
         if info.id.is_some() && info.id != settings.last_avatar_id {
             self.shared.settings.write().last_avatar_id = info.id.clone();
         }
@@ -500,12 +496,16 @@ impl Tracker {
         // Publish now rather than with the next tracked face, so the panel updates
         // even while no face is visible.
         let mut snapshot = self.shared.snapshot.lock();
-        snapshot.bindings.clone_from(&self.avatar.bindings);
+        snapshot.bindings = self.avatar.bindings.clone();
         snapshot.avatar_id.clone_from(&self.avatar.info.id);
         snapshot.avatar_name.clone_from(&self.avatar.info.name);
-        snapshot.avatar_ft_params.clone_from(&self.avatar.ft_params);
+        snapshot.avatar_ft_params = self.avatar.ft_params.clone();
         snapshot.vrchat_found = self.avatar.vrchat_found;
         snapshot.avatar_live = self.avatar.live;
+        drop(snapshot);
+        let mut feed = self.sources.feed.lock();
+        feed.bindings = self.avatar.bindings.clone();
+        feed.flags = self.avatar.flags.clone();
     }
 
     fn step(&mut self, settings: &Settings) -> Result<(), Status> {
@@ -572,6 +572,7 @@ impl Tracker {
             }
             let mut snapshot = self.shared.snapshot.lock();
             snapshot.status = Status::NoFace;
+            snapshot.tongue = self.tongue_status.clone();
             snapshot.camera_fps = camera_fps;
             snapshot.frame_size = (frame.width, frame.height);
             snapshot.landmarks.clear();
@@ -598,7 +599,7 @@ impl Tracker {
 
         let processing_started = Instant::now();
         let frown = face::frown_metric(&face.pixel_landmarks);
-        let avatar_key = self.avatar.info.id.clone().unwrap_or_default();
+        let avatar_key = self.avatar_key();
         let (processed, outcome) = {
             let mut store = self.shared.calibrations.lock();
             let calibration = store.avatars.entry(avatar_key).or_default();
@@ -629,8 +630,6 @@ impl Tracker {
         {
             let mut feed = self.sources.feed.lock();
             feed.push(Frame { captured, times, values: outputs.clone() });
-            feed.bindings.clone_from(&self.avatar.bindings);
-            feed.flags.clone_from(&self.avatar.flags);
             feed.active = settings.ft_output;
             if feed.neutral.len() != OUTPUTS.len() {
                 feed.neutral = self.mapper.neutral();

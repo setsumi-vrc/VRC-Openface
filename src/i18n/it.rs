@@ -234,4 +234,5 @@ pub const TEXT: &[(&str, &str)] = &[
         "avatar_last_hint",
         "VRChat non è connesso. È l'ultimo avatar segnalato, letto dalla sua configurazione salvata; la sua calibrazione resta applicata.",
     ),
+    ("directml_missing", "L'inferenza su GPU richiede una build con la funzionalità `directml`."),
 ];

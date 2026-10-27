@@ -1,6 +1,9 @@
 //! Interface text. English, Japanese and Korean live in the table below; every other
 //! language has its own file with the same keys (a test checks that none is missing).
 
+use std::collections::HashMap;
+use std::sync::LazyLock;
+
 use serde::{Deserialize, Serialize};
 
 mod de;
@@ -438,19 +441,41 @@ const TEXT: &[(&str, &str, &str, &str)] = &[
         "VRChatに接続されていません。最後に報告されたアバターを保存済みの設定から読み込んでいます。キャリブレーションはそのまま適用されます。",
         "VRChat에 연결되어 있지 않습니다. 마지막으로 보고된 아바타를 저장된 설정에서 읽어 온 것이며, 보정은 그대로 적용됩니다.",
     ),
+    (
+        "directml_missing",
+        "GPU inference needs a build with the `directml` feature.",
+        "GPU 推論には `directml` 機能付きのビルドが必要です。",
+        "GPU 추론에는 `directml` 기능이 포함된 빌드가 필요합니다.",
+    ),
 ];
 
+/// Every text by key, one per language in [`Language::ALL`] order (English where a language lacks one).
+static TEXTS: LazyLock<HashMap<&'static str, [&'static str; Language::ALL.len()]>> = LazyLock::new(|| {
+    let mut texts: HashMap<_, _> = TEXT
+        .iter()
+        .map(|&(key, en, ja, ko)| {
+            let mut row = [en; Language::ALL.len()];
+            row[Language::Ja as usize] = ja;
+            row[Language::Ko as usize] = ko;
+            (key, row)
+        })
+        .collect();
+    for language in Language::ALL {
+        for &(key, text) in language.table().unwrap_or_default() {
+            if let Some(row) = texts.get_mut(key) {
+                row[language as usize] = text;
+            }
+        }
+    }
+    texts
+});
+
 pub fn tr(language: Language, key: &str) -> &'static str {
-    let Some((_, en, ja, ko)) = TEXT.iter().find(|(k, ..)| *k == key) else {
-        debug_assert!(false, "missing text {key}");
-        return "?";
-    };
-    match language {
-        Language::En => en,
-        Language::Ja => ja,
-        Language::Ko => ko,
-        other => {
-            other.table().and_then(|table| table.iter().find(|(k, _)| *k == key)).map(|(_, text)| *text).unwrap_or(en)
+    match TEXTS.get(key) {
+        Some(row) => row[language as usize],
+        None => {
+            debug_assert!(false, "missing text {key}");
+            "?"
         }
     }
 }
@@ -458,6 +483,20 @@ pub fn tr(language: Language, key: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn languages_index_their_texts() {
+        for (i, language) in Language::ALL.into_iter().enumerate() {
+            assert_eq!(language as usize, i);
+        }
+        let mut keys: Vec<&str> = TEXT.iter().map(|(k, ..)| *k).collect();
+        keys.sort_unstable();
+        let count = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), count, "a key is listed twice");
+        assert_eq!(tr(Language::Es, "settings"), "Ajustes");
+        assert_eq!(tr(Language::Ja, "tray_quit"), "終了");
+    }
 
     #[test]
     fn every_language_has_every_text() {

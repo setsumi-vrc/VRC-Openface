@@ -7,6 +7,14 @@ pub struct GpuAdapter {
     pub name: String,
 }
 
+/// "GPU 0: name", or just the index for an adapter that is no longer listed.
+pub fn gpu_label(gpus: &[GpuAdapter], index: u32) -> String {
+    match gpus.iter().find(|g| g.index == index) {
+        Some(g) => format!("GPU {index}: {}", g.name),
+        None => format!("GPU {index}"),
+    }
+}
+
 #[cfg(windows)]
 pub fn gpu_adapters() -> Vec<GpuAdapter> {
     use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, IDXGIFactory1};

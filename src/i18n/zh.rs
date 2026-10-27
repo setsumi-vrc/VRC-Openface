@@ -198,4 +198,5 @@ pub const TEXT: &[(&str, &str)] = &[
     ("no", "否"),
     ("avatar_last", "上次的虚拟形象:"),
     ("avatar_last_hint", "VRChat 未连接。这是它最后报告的虚拟形象,从其已保存的配置中读取;其校准仍然有效。"),
+    ("directml_missing", "GPU 推理需要启用 `directml` 功能的版本。"),
 ];

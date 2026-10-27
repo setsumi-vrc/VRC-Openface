@@ -157,6 +157,18 @@ fn ms(from: Instant, to: Instant) -> f32 {
     to.saturating_duration_since(from).as_secs_f32() * 1000.0
 }
 
+/// Milliseconds since `started`.
+pub fn ms_since(started: Instant) -> f32 {
+    ms(started, Instant::now())
+}
+
+/// Drops the samples older than `window` from the front of a time-ordered queue.
+fn prune<T>(samples: &mut VecDeque<(Instant, T)>, now: Instant, window: Duration) {
+    while samples.front().is_some_and(|(t, _)| now.duration_since(*t) > window) {
+        samples.pop_front();
+    }
+}
+
 /// Latency breakdown of one frame along a path, as (kind, ms) segments in order.
 pub type Breakdown = Vec<(Segment, f32)>;
 
@@ -199,9 +211,7 @@ impl Series {
     pub fn push(&mut self, value: f32) {
         let now = Instant::now();
         self.samples.push_back((now, value));
-        while self.samples.front().is_some_and(|(t, _)| now.duration_since(*t) > WINDOW) {
-            self.samples.pop_front();
-        }
+        prune(&mut self.samples, now, WINDOW);
     }
 
     pub fn average(&self, over: Duration) -> Option<f32> {
@@ -235,24 +245,23 @@ impl PathSeries {
         let now = Instant::now();
         self.total.push(breakdown.iter().map(|(_, v)| v).sum());
         self.samples.push_back((now, breakdown));
-        while self.samples.front().is_some_and(|(t, _)| now.duration_since(*t) > WINDOW) {
-            self.samples.pop_front();
-        }
+        prune(&mut self.samples, now, WINDOW);
     }
 
     /// Average of each segment over the last `over`.
     pub fn average(&self, over: Duration) -> Option<Breakdown> {
         let now = Instant::now();
-        let recent: Vec<&Breakdown> =
-            self.samples.iter().rev().take_while(|(t, _)| now.duration_since(*t) <= over).map(|(_, b)| b).collect();
-        let first = recent.first()?;
-        let mut sums: Breakdown = first.iter().map(|(kind, _)| (*kind, 0.0)).collect();
-        for b in &recent {
-            for (sum, (_, v)) in sums.iter_mut().zip(b.iter()) {
+        let mut recent = self.samples.iter().rev().take_while(|(t, _)| now.duration_since(*t) <= over);
+        let (_, first) = recent.next()?;
+        let mut sums = first.clone();
+        let mut n = 1;
+        for (_, b) in recent {
+            for (sum, (_, v)) in sums.iter_mut().zip(b) {
                 sum.1 += v;
             }
+            n += 1;
         }
-        sums.iter_mut().for_each(|s| s.1 /= recent.len() as f32);
+        sums.iter_mut().for_each(|s| s.1 /= n as f32);
         Some(sums)
     }
 }
@@ -288,9 +297,7 @@ impl Perf {
     pub fn sample_memory(&mut self, sample: MemorySample) {
         let now = Instant::now();
         self.memory.push_back((now, sample));
-        while self.memory.front().is_some_and(|(t, _)| now.duration_since(*t) > MEMORY_WINDOW) {
-            self.memory.pop_front();
-        }
+        prune(&mut self.memory, now, MEMORY_WINDOW);
     }
 }
 

@@ -13,32 +13,29 @@ impl RgbFrame {
     }
 
     pub fn flip_horizontal(&mut self) {
-        let row = self.width * 3;
-        for line in self.data.chunks_exact_mut(row) {
-            for x in 0..self.width / 2 {
-                let (a, b) = (x * 3, (self.width - 1 - x) * 3);
-                for c in 0..3 {
-                    line.swap(a + c, b + c);
-                }
-            }
+        if self.width == 0 {
+            return;
+        }
+        for line in self.data.chunks_exact_mut(self.width * 3) {
+            line.as_chunks_mut::<3>().0.reverse();
         }
     }
 
     /// Nearest-neighbour downscale used for the UI preview only.
     pub fn downscale_to_width(&self, max_width: usize) -> RgbFrame {
-        if self.width <= max_width {
+        if self.width <= max_width || max_width == 0 {
             return self.clone();
         }
         let scale = max_width as f32 / self.width as f32;
         let height = ((self.height as f32 * scale).round() as usize).max(1);
+        let source = |i: usize, len: usize| (((i as f32 + 0.5) / scale) as usize).min(len - 1);
+        // Every output row reads the same source columns.
+        let columns: Vec<usize> = (0..max_width).map(|x| source(x, self.width)).collect();
+        let pixels = self.data.as_chunks::<3>().0;
         let mut data = Vec::with_capacity(max_width * height * 3);
         for y in 0..height {
-            let sy = ((y as f32 + 0.5) / scale) as usize;
-            let src = &self.data[sy.min(self.height - 1) * self.width * 3..];
-            for x in 0..max_width {
-                let sx = (((x as f32 + 0.5) / scale) as usize).min(self.width - 1) * 3;
-                data.extend_from_slice(&src[sx..sx + 3]);
-            }
+            let row = &pixels[source(y, self.height) * self.width..];
+            data.extend(columns.iter().flat_map(|&x| row[x]));
         }
         RgbFrame::new(max_width, height, data)
     }
@@ -104,6 +101,7 @@ fn box_pass(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: usi
     let (lines, len) = if horizontal { (height, width) } else { (width, height) };
     let at = |line: usize, i: usize| if horizontal { (line * width + i) * 3 } else { (i * width + line) * 3 };
     let window = (2 * radius + 1) as u32;
+    // Rounded rather than truncated, so three passes do not darken the image.
     // prefix[c][j] = sum of the edge-clamped line from position -radius up to j - radius - 1.
     let mut prefix = vec![[0u32; 3]; len + 2 * radius + 1];
     for line in 0..lines {
@@ -117,7 +115,7 @@ fn box_pass(src: &[u8], dst: &mut [u8], width: usize, height: usize, radius: usi
         for i in 0..len {
             let q = at(line, i);
             for c in 0..3 {
-                dst[q + c] = ((prefix[i + 2 * radius + 1][c] - prefix[i][c]) / window) as u8;
+                dst[q + c] = ((prefix[i + 2 * radius + 1][c] - prefix[i][c] + window / 2) / window) as u8;
             }
         }
     }
@@ -137,5 +135,16 @@ mod tests {
         let mut dot = RgbFrame::new(9, 1, data);
         dot.blur(1);
         assert!(dot.data[3 * 3] > 0 && dot.data[4 * 3] < 255);
+    }
+
+    #[test]
+    fn mirror_and_downscale_keep_pixels() {
+        let mut frame = RgbFrame::new(3, 1, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        frame.flip_horizontal();
+        assert_eq!(frame.data, [7, 8, 9, 4, 5, 6, 1, 2, 3]);
+        let wide = RgbFrame::new(4, 2, (0..24).collect());
+        let small = wide.downscale_to_width(2);
+        assert_eq!((small.width, small.height), (2, 1));
+        assert_eq!(small.data, [15, 16, 17, 21, 22, 23]);
     }
 }

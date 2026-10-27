@@ -26,20 +26,33 @@ left alone. Note that a running VRChat will receive OSC from any test run.
 
 ## Architecture
 
-Library crate (`src/lib.rs`) plus a thin binary (`src/main.rs`). Threads:
+Library crate (`src/lib.rs`) plus a thin binary (`src/main.rs`). Source tree:
 
-- **UI** (`app.rs`, eframe/egui 0.37, `App::ui` API): draws from a cloned `Snapshot`,
+```
+src/
+  app/      main window: mod.rs (state, frame loop, layout), chrome (top bar, menus, window drag
+            and resize), preview (camera card), calibration, panels (the three parameter panels and
+            their links), rows, controls, settings, performance (debug window), style (fonts, egui style)
+  ui/       drawing toolkit shared with the tray: widgets, icons, theme, tray
+  face/     MediaPipe pipeline: detector, landmarks, blendshapes, filter, tongue
+  vrchat/   osc (bindings, sender), output (100 Hz loop), oscquery, avatar (receiver, config files)
+  camera, image, channels, processing, mapping, tracker, perf, config, system, updater, i18n/
+```
+
+Threads:
+
+- **UI** (`app/`, eframe/egui 0.37, `App::ui` API): draws from a cloned `Snapshot`,
   edits `Settings` and the per-avatar `CalibrationStore` in `Shared`, and saves both
   every 2 s when they change. It sends `Command`s (capture neutral, undo, gaze, reload
   models) to the tracker. When idle it stops drawing (`ui_awake`).
 - **Tracker** (`tracker.rs`): camera → `FaceLandmarker` → optional `TongueModel` →
   `Processor` → `Mapper` → pushes a `Frame` into the output feed and updates `Snapshot`.
   It also merges avatar information (see below) and records stage timings in `perf.rs`.
-- **Output** (`output.rs`): sends OSC at 100 Hz. With interpolation on, it renders one
+- **Output** (`vrchat/output.rs`): sends OSC at 100 Hz. With interpolation on, it renders one
   frame interval in the past and blends the two latest frames; FT off sends
   `Mapper::neutral()`. `system::high_resolution_timer()` makes the sleeps accurate.
-- **OSCQuery** (`oscquery.rs`): mDNS `_oscjson._tcp` → `GET /avatar` every 2 s.
-- **Receiver** (`avatar.rs`): `/avatar/change` on the receive port (9001), plus
+- **OSCQuery** (`vrchat/oscquery.rs`): mDNS `_oscjson._tcp` → `GET /avatar` every 2 s.
+- **Receiver** (`vrchat/avatar.rs`): `/avatar/change` on the receive port (9001), plus
   `load_config` for VRChat's `LocalLow/VRChat/VRChat/OSC/usr_*/Avatars/<id>.json`
   (avatar name and parameters when OSCQuery is unavailable).
 
@@ -68,7 +81,9 @@ image (mean blendshape difference ≈ 0.01 when this was written).
 ### Processing and mapping
 
 - `channels.rs`: 52 MediaPipe channels + 6 tongue channels (`COUNT` = 58), symmetry
-  groups (jaw and tongue are excluded from the global switch), display rows.
+  groups (jaw and tongue are excluded from the global switch), display rows. `index` is a
+  `const fn`: per-frame code uses `const { index("...") }` (or a `const`) so names resolve at
+  compile time and a typo fails the build.
 - `processing.rs`, in order: mesh frown source → One-Euro smoothing (strength 0..1,
   global or per channel) → per-avatar `ChannelCalibration` (min/max remap or override;
   L/R linked unless listed in `unlinked`) → symmetry → gaze minus `gaze_center`.
@@ -77,9 +92,11 @@ image (mean blendshape difference ≈ 0.01 when this was written).
 - `mapping.rs`: `OUTPUTS` is the single source of truth (VRCFT name, friendly name,
   input channels, formula, signed, cat ears). The order of `inputs` is the order the
   formula receives values, and dependencies for the UI come from the same list.
-- `osc.rs`: `bind()` matches parameters by their name after `v2/` (any prefix). A
+- `vrchat/osc.rs`: `bind()` matches parameters by their name after `v2/` (any prefix). A
   `Binding` can have a float address and binary bits at the same time; both are sent.
-  Sends are deduplicated, bundled (≤ 4 KB) and fully repeated once per second.
+  Sends are deduplicated, bundled (≤ 4 KB) and fully repeated once per second. `Bindings` is an
+  `Arc<[Option<Binding>]>` shared by the tracker, the output thread and the snapshot; the
+  tracker replaces it only when the avatar changes.
 
 ### Camera (`camera.rs`)
 
@@ -88,7 +105,7 @@ closest area, then MJPG > NV12 > YUY2) and asks the source reader for RGB32, sca
 the requested width when the camera only offers large modes. nokhwa is used only on
 other platforms; its MSMF backend misreported modes and delivered about 12 FPS on a Brio 500.
 
-### Interface details (`app.rs`)
+### Interface details (`app/`)
 
 - Panel headers go through `header()`: title on the left (truncated), controls on the
   right, added right-to-left. Never let a right-to-left row overflow: it pushes the whole
@@ -105,8 +122,8 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
   the outer `RESIZE_BAND` points into resize handles (`BeginResize`) and raises a restored size below
   `MIN_WINDOW` once; the drag in `top_bar` ignores presses in that band. Close goes through the
   normal close request, so close-to-tray still applies.
-- Controls come from `widgets.rs` (`button`, `icon_button`, `chip`, `pill`, `card`); icons are
-  drawn by `icons.rs` on a 24 x 24 grid. Do not put glyph characters (arrows, check marks, emoji)
+- Controls come from `ui/widgets.rs` (`button`, `icon_button`, `chip`, `pill`, `card`); icons are
+  drawn by `ui/icons.rs` on a 24 x 24 grid. Do not put glyph characters (arrows, check marks, emoji)
   in UI text: Segoe UI lacks them and they show as boxes. Add a `Glyph` instead.
 - Fonts: `load_fonts` puts Segoe UI first (and its semibold as the `semibold` family) for
   non-CJK languages; Japanese, Korean and Chinese put their own CJK font first. A language's own
@@ -123,7 +140,7 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
   when the Unified Expressions list is laid out.
 - Use `min().max()` rather than `f32::clamp` with bounds taken from layout rects; empty
   rects (min > max) make `clamp` panic.
-- `tray.rs` (Windows only, `tray-icon`): closing the window is cancelled and the window hidden
+- `ui/tray.rs` (Windows only, `tray-icon`): closing the window is cancelled and the window hidden
   with Win32 `ShowWindow`; the tray handlers show it again the same way, because a hidden window
   may not run the egui loop. Quit sets `quitting` so the close goes through. The right-click menu is a
   deferred egui viewport (title "VRC Openface menu", declared by `declare_menu` in every `ui` pass or egui
@@ -137,10 +154,13 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
 ### Other modules
 
 `config.rs` (Settings, data dir, JSON persistence via write-then-rename), `i18n/`
-(`mod.rs` holds EN/JA/KO, one file per other language; CJK glyphs come from Windows fonts loaded in
-`app.rs`, the selected language's font first),
-`theme.rs` (color schemes), `updater.rs` (GitHub releases of this repo; install renames
-files in use to `*.old`, writes new ones and restarts), `system.rs` (DXGI adapters =
+(`mod.rs` holds EN/JA/KO, one file per other language; `tr` looks texts up in a table built once;
+CJK glyphs come from Windows fonts loaded in `app/style.rs`, the selected language's font first),
+`ui/theme.rs` (color schemes), `updater.rs` (GitHub releases of this repo; install renames
+files in use to `*.old`, writes new ones and restarts, and puts the old files back if writing
+fails; the next start removes `*.old` only in the exe folder and `models/`, and only next to
+the file that replaced it; versions compare as SemVer, a pre-release below its release),
+`system.rs` (DXGI adapters =
 DirectML device ids, private memory, timer resolution).
 
 ## Conventions
@@ -157,5 +177,5 @@ DirectML device ids, private memory, timer resolution).
   settings, calibrations or avatar setups. Record every change under `[Unreleased]` in
   `CHANGELOG.md`; on release, rename that section to the version and date, bump
   `Cargo.toml`, tag `vX.Y.Z` and use the section as the release notes.
-- Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/`, `README.md` and `LICENSE`;
-  the updater requires the exe in the zip.
+- Release zips contain `vrc-openface.exe`, `DirectML.dll`, `models/` (the three face models
+  and its README), `README.md` and `LICENSE`; the updater requires the exe in the zip.

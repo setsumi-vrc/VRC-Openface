@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::i18n::Language;
 use crate::processing::{CalibrationStore, ProcessingSettings};
-use crate::theme::{CustomColors, Scheme};
+use crate::ui::theme::{CustomColors, Scheme};
 use crate::updater::Channel;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

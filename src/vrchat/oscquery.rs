@@ -9,12 +9,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use parking_lot::Mutex;
 use serde_json::Value;
 
-use crate::osc::{AvatarInfo, AvatarParam, ParamType};
+use crate::vrchat::osc::{AvatarInfo, AvatarParam, ParamType};
 
 const SERVICE: &str = "_oscjson._tcp.local.";
 const POLL: Duration = Duration::from_secs(2);
@@ -49,11 +49,16 @@ fn run(state: &SharedDiscovery) -> Result<()> {
     let mdns = ServiceDaemon::new().context("starting mDNS")?;
     let events = mdns.browse(SERVICE).context("browsing for OSCQuery services")?;
     let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(2))).build().into();
-    let mut last_poll = Instant::now() - POLL;
+    let mut last_poll: Option<Instant> = None;
     let mut last_raw = String::new();
 
     loop {
-        while let Ok(event) = events.recv_timeout(Duration::from_millis(250)) {
+        loop {
+            let event = match events.recv_timeout(Duration::from_millis(250)) {
+                Ok(event) => event,
+                Err(e) if events.is_disconnected() => bail!("mDNS stopped: {e}"),
+                Err(_) => break,
+            };
             match event {
                 ServiceEvent::ServiceResolved(info) if info.get_fullname().starts_with("VRChat-Client-") => {
                     let addresses = info.get_addresses_v4();
@@ -75,10 +80,10 @@ fn run(state: &SharedDiscovery) -> Result<()> {
             }
         }
 
-        if last_poll.elapsed() < POLL {
+        if last_poll.is_some_and(|at| at.elapsed() < POLL) {
             continue;
         }
-        last_poll = Instant::now();
+        last_poll = Some(Instant::now());
         let Some(endpoint) = state.lock().endpoint else { continue };
         match fetch(&agent, endpoint) {
             Ok(raw) if raw == last_raw => state.lock().error = None,

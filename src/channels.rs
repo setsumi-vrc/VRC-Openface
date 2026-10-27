@@ -1,6 +1,8 @@
 //! Catalogue of tracked channels: the 52 MediaPipe blendshapes followed by the six
 //! optional tongue channels.
 
+use std::sync::LazyLock;
+
 use crate::face::TONGUE_CHANNELS;
 
 pub const MEDIAPIPE: [&str; 52] = [
@@ -60,12 +62,45 @@ pub const MEDIAPIPE: [&str; 52] = [
 
 pub const COUNT: usize = MEDIAPIPE.len() + TONGUE_CHANNELS.len();
 
-pub fn name(index: usize) -> &'static str {
+pub const fn name(index: usize) -> &'static str {
     if index < MEDIAPIPE.len() { MEDIAPIPE[index] } else { TONGUE_CHANNELS[index - MEDIAPIPE.len()] }
 }
 
-pub fn index(name: &str) -> usize {
-    (0..COUNT).find(|&i| self::name(i) == name).unwrap_or_else(|| panic!("unknown channel {name}"))
+/// `str` equality usable in constants.
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut i = 0;
+    while i < a.len() {
+        if a[i] != b[i] {
+            return false;
+        }
+        i += 1;
+    }
+    true
+}
+
+/// Position of the channel called `name`.
+pub const fn find(name: &str) -> Option<usize> {
+    let mut i = 0;
+    while i < COUNT {
+        if same(self::name(i), name) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Position of a channel that must exist. Use it in a `const` (or `const { }` block) so a
+/// misspelled name fails the build instead of panicking at run time.
+pub const fn index(name: &str) -> usize {
+    match find(name) {
+        Some(i) => i,
+        None => panic!("unknown channel"),
+    }
 }
 
 pub fn is_tongue(index: usize) -> bool {
@@ -129,13 +164,19 @@ pub fn symmetry_group(index: usize) -> Option<&'static str> {
 
 /// The other side of a Left/Right channel, e.g. `eyeBlinkLeft` -> `eyeBlinkRight`.
 pub fn mirror(index: usize) -> Option<usize> {
-    let n = name(index);
-    let other = if let Some(base) = n.strip_suffix("Left") {
-        format!("{base}Right")
-    } else {
-        format!("{}Left", n.strip_suffix("Right")?)
-    };
-    (0..COUNT).find(|&i| name(i) == other)
+    // Looked up by name once; the interface asks for every row in every frame.
+    static MIRRORS: LazyLock<[Option<usize>; COUNT]> = LazyLock::new(|| {
+        std::array::from_fn(|i| {
+            let n = name(i);
+            let other = match (n.strip_suffix("Left"), n.strip_suffix("Right")) {
+                (Some(base), _) => format!("{base}Right"),
+                (_, Some(base)) => format!("{base}Left"),
+                _ => return None,
+            };
+            find(&other)
+        })
+    });
+    MIRRORS.get(index).copied().flatten()
 }
 
 /// Human readable label, e.g. `eyeLookInLeft` -> `Eye Look In (Left)`.
@@ -144,23 +185,21 @@ pub fn label(index: usize) -> String {
     if raw == "_neutral" {
         return "Neutral".into();
     }
-    let (base, side) = if let Some(b) = raw.strip_suffix("Left") {
-        (b, Some("Left"))
-    } else if let Some(b) = raw.strip_suffix("Right") {
-        (b, Some("Right"))
-    } else {
-        (raw, None)
+    let (base, side) = match (raw.strip_suffix("Left"), raw.strip_suffix("Right")) {
+        (Some(b), _) => (b, Some("Left")),
+        (_, Some(b)) => (b, Some("Right")),
+        _ => (raw, None),
     };
-    let mut words = String::new();
+    let mut words = String::with_capacity(base.len() + 8);
     for (i, c) in base.chars().enumerate() {
         if i == 0 {
             words.extend(c.to_uppercase());
-        } else {
-            if c.is_uppercase() {
-                words.push(' ');
-            }
-            words.push(c);
+            continue;
         }
+        if c.is_uppercase() {
+            words.push(' ');
+        }
+        words.push(c);
     }
     match side {
         Some(side) => format!("{words} ({side})"),
@@ -168,8 +207,16 @@ pub fn label(index: usize) -> String {
     }
 }
 
-/// Display groups for the channel panel: rows of (left, right) or a single channel.
-pub fn display_rows() -> Vec<Vec<(usize, Option<usize>)>> {
+/// One line of the channel panel: a channel, or a left channel and its right side.
+pub type DisplayRow = (usize, Option<usize>);
+
+/// Display groups for the channel panel, built once.
+pub fn display_rows() -> &'static [Vec<DisplayRow>] {
+    static ROWS: LazyLock<Vec<Vec<DisplayRow>>> = LazyLock::new(build_display_rows);
+    &ROWS
+}
+
+fn build_display_rows() -> Vec<Vec<DisplayRow>> {
     let groups: [&[&str]; 8] = [
         &["browDown", "browInnerUp", "browOuterUp"],
         &["eyeBlink", "eyeSquint", "eyeWide"],
@@ -188,17 +235,34 @@ pub fn display_rows() -> Vec<Vec<(usize, Option<usize>)>> {
         ],
         &["tongueOut", "tongue", "tongueUp", "tongueDown", "tongueRoll"],
     ];
-    let find = |n: String| (0..COUNT).find(|&i| name(i) == n);
     groups
         .iter()
         .map(|group| {
             group
                 .iter()
-                .filter_map(|base| match (find(format!("{base}Left")), find(format!("{base}Right"))) {
+                .filter_map(|base| match (find(&format!("{base}Left")), find(&format!("{base}Right"))) {
                     (Some(l), r) => Some((l, r)),
-                    _ => find(base.to_string()).map(|i| (i, None)),
+                    _ => find(base).map(|i| (i, None)),
                 })
                 .collect()
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn names_resolve_and_mirror() {
+        assert_eq!(find("eyeBlinkLeft").map(name), Some("eyeBlinkLeft"));
+        assert_eq!(find("nope"), None);
+        let (l, r) = (index("eyeBlinkLeft"), index("eyeBlinkRight"));
+        assert_eq!((mirror(l), mirror(r)), (Some(r), Some(l)));
+        assert_eq!(mirror(index("jawOpen")), None);
+        assert_eq!(label(index("eyeLookInLeft")), "Eye Look In (Left)");
+        // Every channel but the neutral score has a place in the panel.
+        let shown: usize = display_rows().iter().flatten().map(|(_, r)| 1 + usize::from(r.is_some())).sum();
+        assert_eq!(shown, COUNT - 1);
+    }
 }

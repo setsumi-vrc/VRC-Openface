@@ -33,14 +33,14 @@ mod imp {
         FindWindowW, GetWindowRect, HWND_TOPMOST, IsWindowVisible, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOSIZE,
         SWP_SHOWWINDOW, SetForegroundWindow, SetWindowPos, ShowWindow,
     };
-    use windows::core::{PCWSTR, w};
+    use windows::core::{HSTRING, PCWSTR};
 
     use crate::app::status_line;
-    use crate::i18n::{Language, tr};
-    use crate::icons::{self, Glyph};
-    use crate::theme::{Palette, mix};
+    use crate::i18n::tr;
     use crate::tracker::Shared;
-    use crate::widgets;
+    use crate::ui::icons::{self, Glyph};
+    use crate::ui::theme::{Palette, mix};
+    use crate::ui::widgets;
 
     /// Window title the menu is found by (its handle is not exposed to the callback).
     const MENU_TITLE: &str = "VRC Openface menu";
@@ -52,6 +52,7 @@ mod imp {
         base: Icon,
         base_rgba: (Vec<u8>, u32, u32),
         badge: Option<Color32>,
+        /// Status text the tooltip shows.
         tooltip: String,
         menu: Arc<Menu>,
         shared: Arc<Shared>,
@@ -125,7 +126,7 @@ mod imp {
         fn window(&self) -> Option<HWND> {
             let mut hwnd = self.hwnd.load(Ordering::Relaxed);
             if hwnd == 0 {
-                let found = unsafe { FindWindowW(PCWSTR::null(), w!("VRC Openface menu")) }.ok()?;
+                let found = unsafe { FindWindowW(PCWSTR::null(), &HSTRING::from(MENU_TITLE)) }.ok()?;
                 hwnd = found.0 as isize;
                 self.hwnd.store(hwnd, Ordering::Relaxed);
                 // Rounded corners and a shadow, where the system has them (Windows 11).
@@ -315,12 +316,12 @@ mod imp {
     }
 
     impl Tray {
-        pub fn new(cc: &eframe::CreationContext<'_>, _language: Language, shared: Arc<Shared>) -> Option<Self> {
+        pub fn new(cc: &eframe::CreationContext<'_>, shared: Arc<Shared>) -> Option<Self> {
             let hwnd = match cc.window_handle().ok()?.as_raw() {
                 RawWindowHandle::Win32(window) => window.hwnd.get(),
                 _ => return None,
             };
-            let image = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon.png")).ok()?;
+            let image = eframe::icon_data::from_png_bytes(include_bytes!("../../assets/icon.png")).ok()?;
             let base_rgba = (image.rgba.clone(), image.width, image.height);
             let base = Icon::from_rgba(image.rgba, image.width, image.height).ok()?;
             let tray = TrayIconBuilder::new()
@@ -400,10 +401,9 @@ mod imp {
                     Icon::from_rgba(rgba, self.base_rgba.1, self.base_rgba.2).unwrap_or_else(|_| self.base.clone());
                 let _ = self.icon.set_icon(Some(icon));
             }
-            let tooltip = format!("VRC Openface · {text}");
-            if self.tooltip != tooltip {
-                let _ = self.icon.set_tooltip(Some(&tooltip));
-                self.tooltip = tooltip;
+            if self.tooltip != text {
+                let _ = self.icon.set_tooltip(Some(format!("VRC Openface · {text}")));
+                self.tooltip = text;
             }
         }
 
@@ -428,20 +428,19 @@ mod imp {
 mod stub {
     use std::sync::Arc;
 
-    use crate::i18n::Language;
     use crate::tracker::Shared;
 
     /// No tray on this platform; the app behaves as before.
     pub struct Tray;
 
     impl Tray {
-        pub fn new(_cc: &eframe::CreationContext<'_>, _language: Language, _shared: Arc<Shared>) -> Option<Self> {
+        pub fn new(_cc: &eframe::CreationContext<'_>, _shared: Arc<Shared>) -> Option<Self> {
             None
         }
 
         pub fn declare_menu(&self, _ctx: &egui::Context) {}
 
-        pub fn refresh(&mut self, _pal: &crate::theme::Palette, _mark: Option<egui::TextureId>) {}
+        pub fn refresh(&mut self, _pal: &crate::ui::theme::Palette, _mark: Option<egui::TextureId>) {}
 
         pub fn quitting(&self) -> bool {
             false

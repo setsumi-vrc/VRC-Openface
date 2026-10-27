@@ -8,9 +8,9 @@ use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 
-use crate::osc::{Binding, OscSender};
 use crate::perf::{self, FrameTimes, Path, Perf, Stage};
 use crate::system;
+use crate::vrchat::osc::{Bindings, OscSender};
 
 const RATE_HZ: f64 = 100.0;
 /// Frames older than this are held instead of interpolated toward.
@@ -29,8 +29,8 @@ pub struct Feed {
     previous: Option<Frame>,
     latest: Option<Frame>,
     sequence: u64,
-    pub bindings: Vec<Option<Binding>>,
-    pub flags: Vec<String>,
+    pub bindings: Bindings,
+    pub flags: Arc<[String]>,
     /// FT output switch: off sends `neutral` and clears the tracking-active flags.
     pub active: bool,
     pub neutral: Vec<f32>,
@@ -94,6 +94,8 @@ fn run(feed: &SharedFeed, perf: &Mutex<Perf>) {
             next = now;
         }
 
+        // Everything is copied out (the slices are shared, not copied) so the lock is not held
+        // while sending.
         let (values, bindings, flags, active, first_use) = {
             let f = feed.lock();
             sender.set_target(&f.host, f.port);
@@ -121,7 +123,7 @@ fn run(feed: &SharedFeed, perf: &Mutex<Perf>) {
 
         let started = Instant::now();
         let result = sender.send_frame(&bindings, &values, &flags, active);
-        let send_ms = started.elapsed().as_secs_f32() * 1000.0;
+        let send_ms = perf::ms_since(started);
         let mut p = perf.lock();
         p.record(Stage::Osc, send_ms);
         if let Some(times) = first_use {

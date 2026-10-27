@@ -5,7 +5,8 @@ use std::sync::Arc;
 
 use vrc_openface::config::Settings;
 use vrc_openface::tracker::{self, Shared, Sources};
-use vrc_openface::{app, avatar, oscquery, output, updater};
+use vrc_openface::vrchat::{avatar, oscquery, output};
+use vrc_openface::{app, updater};
 
 /// Models are looked up next to the executable first, then in the working directory,
 /// then in the source tree for `cargo run`.

@@ -42,42 +42,56 @@ impl Output {
     }
 }
 
-const fn out(
-    name: &'static str,
-    friendly: &'static str,
-    inputs: &'static [&'static str],
-    f: fn(&[f32]) -> f32,
-) -> Output {
-    Output { name, friendly, inputs, eval: Eval::F(f), signed: false, cat_ears: false }
+/// Position of the output called `name` in [`OUTPUTS`].
+pub fn output_index(name: &str) -> Option<usize> {
+    OUTPUTS.iter().position(|o| o.name == name)
 }
 
-const fn signed(
-    name: &'static str,
-    friendly: &'static str,
-    inputs: &'static [&'static str],
-    f: fn(&[f32]) -> f32,
-) -> Output {
-    Output { name, friendly, inputs, eval: Eval::F(f), signed: true, cat_ears: false }
+impl Output {
+    const fn new(name: &'static str, inputs: &'static [&'static str], eval: Eval) -> Self {
+        Output { name, friendly: name, inputs, eval, signed: false, cat_ears: false }
+    }
+
+    /// A shorter label for "Friendly names" than the parameter name.
+    const fn friendly(mut self, friendly: &'static str) -> Self {
+        self.friendly = friendly;
+        self
+    }
+
+    const fn signed(mut self) -> Self {
+        self.signed = true;
+        self
+    }
 }
 
-const fn direct(name: &'static str, friendly: &'static str, input: &'static [&'static str]) -> Output {
-    out(name, friendly, input, first)
+const fn out(name: &'static str, inputs: &'static [&'static str], f: fn(&[f32]) -> f32) -> Output {
+    Output::new(name, inputs, Eval::F(f))
 }
 
-const fn mean_of(name: &'static str, friendly: &'static str, inputs: &'static [&'static str]) -> Output {
-    out(name, friendly, inputs, mean)
+const fn signed(name: &'static str, inputs: &'static [&'static str], f: fn(&[f32]) -> f32) -> Output {
+    out(name, inputs, f).signed()
+}
+
+const fn direct(name: &'static str, input: &'static [&'static str]) -> Output {
+    out(name, input, first)
+}
+
+const fn mean_of(name: &'static str, inputs: &'static [&'static str]) -> Output {
+    out(name, inputs, mean)
 }
 
 const fn gaze(name: &'static str, inputs: &'static [&'static str], axis: GazeAxis) -> Output {
-    Output { name, friendly: name, inputs, eval: Eval::Gaze(axis), signed: true, cat_ears: false }
+    Output::new(name, inputs, Eval::Gaze(axis)).signed()
 }
 
 const fn zero(name: &'static str) -> Output {
-    Output { name, friendly: name, inputs: &[], eval: Eval::Zero, signed: false, cat_ears: false }
+    Output::new(name, &[], Eval::Zero)
 }
 
 const fn ear(name: &'static str, inputs: &'static [&'static str]) -> Output {
-    Output { name, friendly: name, inputs, eval: Eval::F(ear_pose), signed: true, cat_ears: true }
+    let mut output = signed(name, inputs, ear_pose);
+    output.cat_ears = true;
+    output
 }
 
 fn first(v: &[f32]) -> f32 {
@@ -142,137 +156,128 @@ pub const OUTPUTS: &[Output] = &[
     gaze("EyeRightY", LOOK_R, GazeAxis::RightY),
     gaze("EyeX", LOOK, GazeAxis::X),
     gaze("EyeY", LOOK, GazeAxis::Y),
-    out("EyeLidRight", "EyeLidRight", &["eyeBlinkRight", "eyeWideRight"], |v| lid(v[0], v[1])),
-    out("EyeLidLeft", "EyeLidLeft", &["eyeBlinkLeft", "eyeWideLeft"], |v| lid(v[0], v[1])),
-    out("EyeLid", "EyeLid", &["eyeBlinkLeft", "eyeWideLeft", "eyeBlinkRight", "eyeWideRight"], |v| {
+    out("EyeLidRight", &["eyeBlinkRight", "eyeWideRight"], |v| lid(v[0], v[1])),
+    out("EyeLidLeft", &["eyeBlinkLeft", "eyeWideLeft"], |v| lid(v[0], v[1])),
+    out("EyeLid", &["eyeBlinkLeft", "eyeWideLeft", "eyeBlinkRight", "eyeWideRight"], |v| {
         (lid(v[0], v[1]) + lid(v[2], v[3])) * 0.5
     }),
-    direct("EyeSquintRight", "EyeSquintRight", &["eyeSquintRight"]),
-    direct("EyeSquintLeft", "EyeSquintLeft", &["eyeSquintLeft"]),
-    mean_of("EyeSquint", "EyeSquint", &["eyeSquintLeft", "eyeSquintRight"]),
-    out("EyesSquint", "EyesSquint", &["eyeSquintLeft", "eyeSquintRight"], max2),
-    out("EyeOpenLeft", "EyeOpenLeft", &["eyeBlinkLeft"], open),
-    out("EyeOpenRight", "EyeOpenRight", &["eyeBlinkRight"], open),
-    out("EyeOpen", "EyeOpen", &["eyeBlinkLeft", "eyeBlinkRight"], open),
-    direct("EyeClosedLeft", "EyeClosedLeft", &["eyeBlinkLeft"]),
-    direct("EyeClosedRight", "EyeClosedRight", &["eyeBlinkRight"]),
-    mean_of("EyeClosed", "EyeClosed", &["eyeBlinkLeft", "eyeBlinkRight"]),
-    direct("EyeWideLeft", "EyeWideLeft", &["eyeWideLeft"]),
-    direct("EyeWideRight", "EyeWideRight", &["eyeWideRight"]),
-    out("EyeWide", "EyeWide", &["eyeWideLeft", "eyeWideRight"], max2),
+    direct("EyeSquintRight", &["eyeSquintRight"]),
+    direct("EyeSquintLeft", &["eyeSquintLeft"]),
+    mean_of("EyeSquint", &["eyeSquintLeft", "eyeSquintRight"]),
+    out("EyesSquint", &["eyeSquintLeft", "eyeSquintRight"], max2),
+    out("EyeOpenLeft", &["eyeBlinkLeft"], open),
+    out("EyeOpenRight", &["eyeBlinkRight"], open),
+    out("EyeOpen", &["eyeBlinkLeft", "eyeBlinkRight"], open),
+    direct("EyeClosedLeft", &["eyeBlinkLeft"]),
+    direct("EyeClosedRight", &["eyeBlinkRight"]),
+    mean_of("EyeClosed", &["eyeBlinkLeft", "eyeBlinkRight"]),
+    direct("EyeWideLeft", &["eyeWideLeft"]),
+    direct("EyeWideRight", &["eyeWideRight"]),
+    out("EyeWide", &["eyeWideLeft", "eyeWideRight"], max2),
     // Brows
-    direct("BrowLowererLeft", "BrowLowererLeft", &["browDownLeft"]),
-    direct("BrowLowererRight", "BrowLowererRight", &["browDownRight"]),
-    direct("BrowInnerUpLeft", "BrowInnerUpLeft", &["browInnerUp"]),
-    direct("BrowInnerUpRight", "BrowInnerUpRight", &["browInnerUp"]),
-    direct("BrowOuterUpLeft", "BrowOuterUpLeft", &["browOuterUpLeft"]),
-    direct("BrowOuterUpRight", "BrowOuterUpRight", &["browOuterUpRight"]),
-    out("BrowUp", "BrowUp", &["browInnerUp", "browOuterUpLeft", "browOuterUpRight"], brow_up),
-    signed("BrowExpressionRight", "BrowExprRight", &["browInnerUp", "browOuterUpRight", "browDownRight"], |v| {
+    direct("BrowLowererLeft", &["browDownLeft"]),
+    direct("BrowLowererRight", &["browDownRight"]),
+    direct("BrowInnerUpLeft", &["browInnerUp"]),
+    direct("BrowInnerUpRight", &["browInnerUp"]),
+    direct("BrowOuterUpLeft", &["browOuterUpLeft"]),
+    direct("BrowOuterUpRight", &["browOuterUpRight"]),
+    out("BrowUp", &["browInnerUp", "browOuterUpLeft", "browOuterUpRight"], brow_up),
+    signed("BrowExpressionRight", &["browInnerUp", "browOuterUpRight", "browDownRight"], |v| {
         brow_expression(v[0], v[1], v[2])
-    }),
-    signed("BrowExpressionLeft", "BrowExprLeft", &["browInnerUp", "browOuterUpLeft", "browDownLeft"], |v| {
+    })
+    .friendly("BrowExprRight"),
+    signed("BrowExpressionLeft", &["browInnerUp", "browOuterUpLeft", "browDownLeft"], |v| {
         brow_expression(v[0], v[1], v[2])
-    }),
+    })
+    .friendly("BrowExprLeft"),
     signed(
-        "BrowExpression",
         "BrowExpression",
         &["browInnerUp", "browOuterUpLeft", "browDownLeft", "browOuterUpRight", "browDownRight"],
         |v| (brow_expression(v[0], v[1], v[2]) + brow_expression(v[0], v[3], v[4])) * 0.5,
     ),
-    direct("BrowDownLeft", "BrowDownLeft", &["browDownLeft"]),
-    direct("BrowDownRight", "BrowDownRight", &["browDownRight"]),
-    mean_of("BrowDown", "BrowDown", &["browDownLeft", "browDownRight"]),
-    direct("BrowInnerUp", "BrowInnerUp", &["browInnerUp"]),
-    mean_of("BrowOuterUp", "BrowOuterUp", &["browOuterUpLeft", "browOuterUpRight"]),
+    direct("BrowDownLeft", &["browDownLeft"]),
+    direct("BrowDownRight", &["browDownRight"]),
+    mean_of("BrowDown", &["browDownLeft", "browDownRight"]),
+    direct("BrowInnerUp", &["browInnerUp"]),
+    mean_of("BrowOuterUp", &["browOuterUpLeft", "browOuterUpRight"]),
     // Jaw, nose, cheeks
-    direct("JawOpen", "JawOpen", &["jawOpen"]),
-    direct("MouthClosed", "MouthClosed", &["mouthClose"]),
-    signed("JawX", "JawX", &["jawRight", "jawLeft"], diff),
-    direct("JawZ", "JawZ", &["jawForward"]),
-    direct("NoseSneerLeft", "NoseSneerLeft", &["noseSneerLeft"]),
-    direct("NoseSneerRight", "NoseSneerRight", &["noseSneerRight"]),
-    mean_of("NoseSneer", "NoseSneer", &["noseSneerLeft", "noseSneerRight"]),
-    direct("CheekSquintLeft", "CheekSquintLeft", &["cheekSquintLeft"]),
-    direct("CheekSquintRight", "CheekSquintRight", &["cheekSquintRight"]),
-    mean_of("CheekSquint", "CheekSquint", &["cheekSquintLeft", "cheekSquintRight"]),
-    direct("CheekPuffSuckLeft", "CheekPuffLeft", &["cheekPuff"]),
-    direct("CheekPuffSuckRight", "CheekPuffRight", &["cheekPuff"]),
-    direct("CheekPuffSuck", "CheekPuff", &["cheekPuff"]),
+    direct("JawOpen", &["jawOpen"]),
+    direct("MouthClosed", &["mouthClose"]),
+    signed("JawX", &["jawRight", "jawLeft"], diff),
+    direct("JawZ", &["jawForward"]),
+    direct("NoseSneerLeft", &["noseSneerLeft"]),
+    direct("NoseSneerRight", &["noseSneerRight"]),
+    mean_of("NoseSneer", &["noseSneerLeft", "noseSneerRight"]),
+    direct("CheekSquintLeft", &["cheekSquintLeft"]),
+    direct("CheekSquintRight", &["cheekSquintRight"]),
+    mean_of("CheekSquint", &["cheekSquintLeft", "cheekSquintRight"]),
+    direct("CheekPuffSuckLeft", &["cheekPuff"]).friendly("CheekPuffLeft"),
+    direct("CheekPuffSuckRight", &["cheekPuff"]).friendly("CheekPuffRight"),
+    direct("CheekPuffSuck", &["cheekPuff"]).friendly("CheekPuff"),
     // Mouth
-    direct("MouthUpperUpLeft", "MouthUpperUpLeft", &["mouthUpperUpLeft"]),
-    direct("MouthUpperUpRight", "MouthUpperUpRight", &["mouthUpperUpRight"]),
-    direct("MouthLowerDownLeft", "MouthLowerDownLeft", &["mouthLowerDownLeft"]),
-    direct("MouthLowerDownRight", "MouthLowerDownRight", &["mouthLowerDownRight"]),
-    direct("MouthCornerPullLeft", "CornerPullLeft", &["mouthSmileLeft"]),
-    direct("MouthCornerPullRight", "CornerPullRight", &["mouthSmileRight"]),
-    direct("MouthFrownLeft", "MouthFrownLeft", &["mouthFrownLeft"]),
-    direct("MouthFrownRight", "MouthFrownRight", &["mouthFrownRight"]),
-    direct("MouthStretchLeft", "StretchLeft", &["mouthStretchLeft"]),
-    direct("MouthStretchRight", "StretchRight", &["mouthStretchRight"]),
-    mean_of("MouthStretch", "Stretch", &["mouthStretchLeft", "mouthStretchRight"]),
-    direct("MouthDimpleLeft", "DimpleLeft", &["mouthDimpleLeft"]),
-    direct("MouthDimpleRight", "DimpleRight", &["mouthDimpleRight"]),
-    mean_of("MouthDimple", "Dimple", &["mouthDimpleLeft", "mouthDimpleRight"]),
-    direct("MouthPressLeft", "PressLeft", &["mouthPressLeft"]),
-    direct("MouthPressRight", "PressRight", &["mouthPressRight"]),
-    mean_of("MouthPress", "Press", &["mouthPressLeft", "mouthPressRight"]),
-    direct("MouthRaiserUpper", "RaiserUpper", &["mouthShrugUpper"]),
-    direct("MouthRaiserLower", "RaiserLower", &["mouthShrugLower"]),
+    direct("MouthUpperUpLeft", &["mouthUpperUpLeft"]),
+    direct("MouthUpperUpRight", &["mouthUpperUpRight"]),
+    direct("MouthLowerDownLeft", &["mouthLowerDownLeft"]),
+    direct("MouthLowerDownRight", &["mouthLowerDownRight"]),
+    direct("MouthCornerPullLeft", &["mouthSmileLeft"]).friendly("CornerPullLeft"),
+    direct("MouthCornerPullRight", &["mouthSmileRight"]).friendly("CornerPullRight"),
+    direct("MouthFrownLeft", &["mouthFrownLeft"]),
+    direct("MouthFrownRight", &["mouthFrownRight"]),
+    direct("MouthStretchLeft", &["mouthStretchLeft"]).friendly("StretchLeft"),
+    direct("MouthStretchRight", &["mouthStretchRight"]).friendly("StretchRight"),
+    mean_of("MouthStretch", &["mouthStretchLeft", "mouthStretchRight"]).friendly("Stretch"),
+    direct("MouthDimpleLeft", &["mouthDimpleLeft"]).friendly("DimpleLeft"),
+    direct("MouthDimpleRight", &["mouthDimpleRight"]).friendly("DimpleRight"),
+    mean_of("MouthDimple", &["mouthDimpleLeft", "mouthDimpleRight"]).friendly("Dimple"),
+    direct("MouthPressLeft", &["mouthPressLeft"]).friendly("PressLeft"),
+    direct("MouthPressRight", &["mouthPressRight"]).friendly("PressRight"),
+    mean_of("MouthPress", &["mouthPressLeft", "mouthPressRight"]).friendly("Press"),
+    direct("MouthRaiserUpper", &["mouthShrugUpper"]).friendly("RaiserUpper"),
+    direct("MouthRaiserLower", &["mouthShrugLower"]).friendly("RaiserLower"),
     // Lips
-    direct("LipFunnelUpperRight", "FunnelUpR", &["mouthFunnel"]),
-    direct("LipFunnelUpperLeft", "FunnelUpL", &["mouthFunnel"]),
-    direct("LipFunnelLowerRight", "FunnelLoR", &["mouthFunnel"]),
-    direct("LipFunnelLowerLeft", "FunnelLoL", &["mouthFunnel"]),
-    direct("LipFunnelUpper", "FunnelUpper", &["mouthFunnel"]),
-    direct("LipFunnelLower", "FunnelLower", &["mouthFunnel"]),
-    direct("LipFunnel", "LipFunnel", &["mouthFunnel"]),
-    direct("LipPuckerUpperRight", "PuckerUpR", &["mouthPucker"]),
-    direct("LipPuckerUpperLeft", "PuckerUpL", &["mouthPucker"]),
-    direct("LipPuckerLowerRight", "PuckerLoR", &["mouthPucker"]),
-    direct("LipPuckerLowerLeft", "PuckerLoL", &["mouthPucker"]),
-    direct("LipPuckerUpper", "PuckerUpper", &["mouthPucker"]),
-    direct("LipPuckerLower", "PuckerLower", &["mouthPucker"]),
-    direct("LipPucker", "LipPucker", &["mouthPucker"]),
-    direct("LipPuckerLeft", "PuckerLeft", &["mouthPucker"]),
-    direct("LipPuckerRight", "PuckerRight", &["mouthPucker"]),
-    direct("LipSuckUpperLeft", "SuckUpL", &["mouthRollUpper"]),
-    direct("LipSuckUpperRight", "SuckUpR", &["mouthRollUpper"]),
-    direct("LipSuckLowerLeft", "SuckLoL", &["mouthRollLower"]),
-    direct("LipSuckLowerRight", "SuckLoR", &["mouthRollLower"]),
-    direct("LipSuckUpper", "SuckUpper", &["mouthRollUpper"]),
-    direct("LipSuckLower", "SuckLower", &["mouthRollLower"]),
-    mean_of("LipSuck", "LipSuck", &["mouthRollUpper", "mouthRollLower"]),
-    signed("MouthX", "MouthX", &["mouthRight", "mouthLeft"], diff),
-    signed("MouthUpperX", "MouthUpperX", &["mouthRight", "mouthLeft"], diff),
-    signed("MouthLowerX", "MouthLowerX", &["mouthRight", "mouthLeft"], diff),
-    mean_of(
-        "MouthOpen",
-        "MouthOpen",
-        &["mouthUpperUpLeft", "mouthUpperUpRight", "mouthLowerDownLeft", "mouthLowerDownRight"],
-    ),
-    direct("MouthSmileLeft", "SmileLeft", &["mouthSmileLeft"]),
-    direct("MouthSmileRight", "SmileRight", &["mouthSmileRight"]),
-    out("MouthSadLeft", "MouthSadLeft", &["mouthFrownLeft", "mouthStretchLeft"], max2),
-    out("MouthSadRight", "MouthSadRight", &["mouthFrownRight", "mouthStretchRight"], max2),
-    mean_of("MouthUpperUp", "UpperUp", &["mouthUpperUpLeft", "mouthUpperUpRight"]),
-    mean_of("MouthLowerDown", "LowerDown", &["mouthLowerDownLeft", "mouthLowerDownRight"]),
-    signed("SmileFrownRight", "SmileFrownR", &["mouthSmileRight", "mouthFrownRight"], diff),
-    signed("SmileFrownLeft", "SmileFrownL", &["mouthSmileLeft", "mouthFrownLeft"], diff),
-    signed(
-        "SmileFrown",
-        "SmileFrown",
-        &["mouthSmileRight", "mouthFrownRight", "mouthSmileLeft", "mouthFrownLeft"],
-        |v| ((v[0] - v[1]) + (v[2] - v[3])) * 0.5,
-    ),
-    signed("SmileSadRight", "SmileSadR", &["mouthSmileRight", "mouthFrownRight", "mouthStretchRight"], |v| {
-        v[0] - v[1].max(v[2])
+    direct("LipFunnelUpperRight", &["mouthFunnel"]).friendly("FunnelUpR"),
+    direct("LipFunnelUpperLeft", &["mouthFunnel"]).friendly("FunnelUpL"),
+    direct("LipFunnelLowerRight", &["mouthFunnel"]).friendly("FunnelLoR"),
+    direct("LipFunnelLowerLeft", &["mouthFunnel"]).friendly("FunnelLoL"),
+    direct("LipFunnelUpper", &["mouthFunnel"]).friendly("FunnelUpper"),
+    direct("LipFunnelLower", &["mouthFunnel"]).friendly("FunnelLower"),
+    direct("LipFunnel", &["mouthFunnel"]),
+    direct("LipPuckerUpperRight", &["mouthPucker"]).friendly("PuckerUpR"),
+    direct("LipPuckerUpperLeft", &["mouthPucker"]).friendly("PuckerUpL"),
+    direct("LipPuckerLowerRight", &["mouthPucker"]).friendly("PuckerLoR"),
+    direct("LipPuckerLowerLeft", &["mouthPucker"]).friendly("PuckerLoL"),
+    direct("LipPuckerUpper", &["mouthPucker"]).friendly("PuckerUpper"),
+    direct("LipPuckerLower", &["mouthPucker"]).friendly("PuckerLower"),
+    direct("LipPucker", &["mouthPucker"]),
+    direct("LipPuckerLeft", &["mouthPucker"]).friendly("PuckerLeft"),
+    direct("LipPuckerRight", &["mouthPucker"]).friendly("PuckerRight"),
+    direct("LipSuckUpperLeft", &["mouthRollUpper"]).friendly("SuckUpL"),
+    direct("LipSuckUpperRight", &["mouthRollUpper"]).friendly("SuckUpR"),
+    direct("LipSuckLowerLeft", &["mouthRollLower"]).friendly("SuckLoL"),
+    direct("LipSuckLowerRight", &["mouthRollLower"]).friendly("SuckLoR"),
+    direct("LipSuckUpper", &["mouthRollUpper"]).friendly("SuckUpper"),
+    direct("LipSuckLower", &["mouthRollLower"]).friendly("SuckLower"),
+    mean_of("LipSuck", &["mouthRollUpper", "mouthRollLower"]),
+    signed("MouthX", &["mouthRight", "mouthLeft"], diff),
+    signed("MouthUpperX", &["mouthRight", "mouthLeft"], diff),
+    signed("MouthLowerX", &["mouthRight", "mouthLeft"], diff),
+    mean_of("MouthOpen", &["mouthUpperUpLeft", "mouthUpperUpRight", "mouthLowerDownLeft", "mouthLowerDownRight"]),
+    direct("MouthSmileLeft", &["mouthSmileLeft"]).friendly("SmileLeft"),
+    direct("MouthSmileRight", &["mouthSmileRight"]).friendly("SmileRight"),
+    out("MouthSadLeft", &["mouthFrownLeft", "mouthStretchLeft"], max2),
+    out("MouthSadRight", &["mouthFrownRight", "mouthStretchRight"], max2),
+    mean_of("MouthUpperUp", &["mouthUpperUpLeft", "mouthUpperUpRight"]).friendly("UpperUp"),
+    mean_of("MouthLowerDown", &["mouthLowerDownLeft", "mouthLowerDownRight"]).friendly("LowerDown"),
+    signed("SmileFrownRight", &["mouthSmileRight", "mouthFrownRight"], diff).friendly("SmileFrownR"),
+    signed("SmileFrownLeft", &["mouthSmileLeft", "mouthFrownLeft"], diff).friendly("SmileFrownL"),
+    signed("SmileFrown", &["mouthSmileRight", "mouthFrownRight", "mouthSmileLeft", "mouthFrownLeft"], |v| {
+        ((v[0] - v[1]) + (v[2] - v[3])) * 0.5
     }),
-    signed("SmileSadLeft", "SmileSadL", &["mouthSmileLeft", "mouthFrownLeft", "mouthStretchLeft"], |v| {
-        v[0] - v[1].max(v[2])
-    }),
+    signed("SmileSadRight", &["mouthSmileRight", "mouthFrownRight", "mouthStretchRight"], |v| v[0] - v[1].max(v[2]))
+        .friendly("SmileSadR"),
+    signed("SmileSadLeft", &["mouthSmileLeft", "mouthFrownLeft", "mouthStretchLeft"], |v| v[0] - v[1].max(v[2]))
+        .friendly("SmileSadL"),
     signed(
-        "SmileSad",
         "SmileSad",
         &[
             "mouthSmileRight",
@@ -285,10 +290,10 @@ pub const OUTPUTS: &[Output] = &[
         |v| ((v[0] - v[1].max(v[2])) + (v[3] - v[4].max(v[5]))) * 0.5,
     ),
     // Tongue
-    direct("TongueOut", "TongueOut", &["tongueOut"]),
-    signed("TongueX", "TongueX", &["tongueRight", "tongueLeft"], diff),
-    signed("TongueY", "TongueY", &["tongueUp", "tongueDown"], diff),
-    direct("TongueRoll", "TongueRoll", &["tongueRoll"]),
+    direct("TongueOut", &["tongueOut"]),
+    signed("TongueX", &["tongueRight", "tongueLeft"], diff),
+    signed("TongueY", &["tongueUp", "tongueDown"], diff),
+    direct("TongueRoll", &["tongueRoll"]),
     zero("TongueArchY"),
     zero("TongueShape"),
     zero("TongueTwistRight"),
@@ -297,6 +302,9 @@ pub const OUTPUTS: &[Output] = &[
     ear("EarLeft", &["browInnerUp", "browOuterUpLeft", "browDownLeft", "eyeWideLeft"]),
     ear("EarRight", &["browInnerUp", "browOuterUpRight", "browDownRight", "eyeWideRight"]),
 ];
+
+/// The most inputs one formula reads.
+const MAX_INPUTS: usize = 8;
 
 /// Pre-resolved channel indices so evaluation never compares strings.
 pub struct Mapper {
@@ -311,7 +319,11 @@ impl Default for Mapper {
 
 impl Mapper {
     pub fn new() -> Self {
-        Self { indices: OUTPUTS.iter().map(|o| o.inputs.iter().map(|n| channels::index(n)).collect()).collect() }
+        let resolve = |o: &Output| -> Vec<usize> {
+            assert!(o.inputs.len() <= MAX_INPUTS, "{} reads too many channels", o.name);
+            o.inputs.iter().map(|n| channels::find(n).unwrap_or_else(|| panic!("unknown channel {n}"))).collect()
+        };
+        Self { indices: OUTPUTS.iter().map(resolve).collect() }
     }
 
     pub fn dependencies(&self, output: usize) -> &[usize] {
@@ -319,16 +331,17 @@ impl Mapper {
     }
 
     pub fn evaluate(&self, values: &[f32; COUNT], gaze: Gaze) -> Vec<f32> {
-        let mut scratch = Vec::with_capacity(8);
+        let mut scratch = [0.0; MAX_INPUTS];
         OUTPUTS
             .iter()
             .zip(&self.indices)
             .map(|(output, indices)| {
                 let value = match output.eval {
                     Eval::F(f) => {
-                        scratch.clear();
-                        scratch.extend(indices.iter().map(|&i| values[i]));
-                        f(&scratch)
+                        for (s, &i) in scratch.iter_mut().zip(indices) {
+                            *s = values[i];
+                        }
+                        f(&scratch[..indices.len()])
                     }
                     Eval::Gaze(axis) => match axis {
                         GazeAxis::LeftX => gaze.left_x,
@@ -368,17 +381,26 @@ mod tests {
     fn mapping_matches_reference_formulas() {
         let mapper = Mapper::new();
         let mut v = [0.0; COUNT];
-        v[channels::index("eyeBlinkLeft")] = 0.4;
-        v[channels::index("eyeWideRight")] = 0.8;
-        v[channels::index("browInnerUp")] = 0.6;
-        v[channels::index("browOuterUpLeft")] = 0.2;
-        v[channels::index("browDownLeft")] = 0.1;
+        for (name, value) in [
+            ("eyeBlinkLeft", 0.4),
+            ("eyeWideRight", 0.8),
+            ("browInnerUp", 0.6),
+            ("browOuterUpLeft", 0.2),
+            ("browDownLeft", 0.1),
+        ] {
+            v[channels::index(name)] = value;
+        }
         let out = mapper.evaluate(&v, Gaze::default());
-        let get = |n: &str| out[OUTPUTS.iter().position(|o| o.name == n).unwrap()];
+        let get = |n: &str| out[output_index(n).unwrap()];
+        assert_eq!(
+            OUTPUTS.iter().find(|o| o.name == "MouthCornerPullLeft").map(|o| o.friendly),
+            Some("CornerPullLeft")
+        );
+        assert_eq!(OUTPUTS.iter().find(|o| o.name == "JawOpen").map(|o| o.label(true)), Some("JawOpen"));
         assert!((get("EyeLidLeft") - 0.45).abs() < 1e-6);
         assert!((get("EyeLidRight") - 0.95).abs() < 1e-6);
         assert!((get("BrowExpressionLeft") - 0.3).abs() < 1e-6);
         assert!((get("BrowUp") - 0.3).abs() < 1e-6);
-        assert!((mapper.neutral()[OUTPUTS.iter().position(|o| o.name == "EyeLid").unwrap()] - 0.75).abs() < 1e-6);
+        assert!((mapper.neutral()[output_index("EyeLid").unwrap()] - 0.75).abs() < 1e-6);
     }
 }

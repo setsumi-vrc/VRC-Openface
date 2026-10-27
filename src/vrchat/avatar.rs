@@ -14,7 +14,7 @@ use parking_lot::Mutex;
 use rosc::{OscPacket, OscType};
 use serde_json::Value;
 
-use crate::osc::{AvatarInfo, AvatarParam, ParamType};
+use crate::vrchat::osc::{AvatarInfo, AvatarParam, ParamType};
 
 /// `%USERPROFILE%\AppData\LocalLow\VRChat\VRChat\OSC`.
 fn osc_root() -> Option<PathBuf> {

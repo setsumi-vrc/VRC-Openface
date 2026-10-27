@@ -12,6 +12,22 @@ Versions follow `MAJOR.MINOR.PATCH`:
 
 ## [Unreleased]
 
+### Fixed
+- Cleaning up after an update no longer deletes every `*.old` file below the folder the app runs from (in Downloads or on the Desktop that could take files of your own): only the files the update replaced, in the app folder and `models/`.
+- The beta channel offers the final release of a version it has a pre-release of (0.7.0 after 0.7.0-beta.1); pre-releases were ranked above their release.
+- An update that fails while writing its files puts the previous files back instead of leaving a half-updated app.
+- The check marks of the calibration steps also show when no avatar is known (the calibration is saved, but the check looked for an avatar id).
+- OSCQuery discovery no longer spins a CPU core if the mDNS service stops.
+- The face detector rejects scores that are not numbers instead of taking them as faces, and checks the size of the model's output.
+- The tongue status in the interface also updates while no face is tracked.
+- The avatar's face tracking parameters are listed by the same rule that binds them.
+- The blurred preview no longer gets slightly darker from rounding.
+- The note about builds without GPU support is translated.
+
+### Changed
+- Less work per frame: the avatar bindings are shared between the tracker, the OSC thread and the interface instead of copied (the OSC thread copied them 100 times a second); interface texts, channel names and mirror sides are looked up in tables built once; the OSC sender no longer allocates for values it already sent and fits more values in each datagram; camera frames are converted into a buffer allocated once.
+- Source tree: the interface is split into `src/app/` by part of the window, VRChat I/O lives in `src/vrchat/` and the drawing toolkit in `src/ui/`.
+
 ## [0.6.0] - 2026-10-26
 
 ### Added

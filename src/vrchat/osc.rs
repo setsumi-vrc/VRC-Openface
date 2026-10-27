@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -16,6 +17,8 @@ const BINARY_STEPS: [u32; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 const TRACKING_FLAGS: [&str; 2] = ["EyeTrackingActive", "LipTrackingActive"];
 /// Keeps each datagram well below the loopback MTU VRChat reads in one go.
 const MAX_BUNDLE_BYTES: usize = 4000;
+/// `#bundle\0` and the time tag.
+const BUNDLE_HEADER: usize = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ParamType {
@@ -38,6 +41,9 @@ pub struct AvatarInfo {
     pub params: Vec<AvatarParam>,
 }
 
+/// Where every output goes, in [`OUTPUTS`] order; shared between threads without copying.
+pub type Bindings = Arc<[Option<Binding>]>;
+
 /// Where one output goes on the avatar. Avatars often declare both a local float and
 /// synced binary bools for the same expression; both are sent, like VRCFaceTracking.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -57,20 +63,23 @@ impl Binding {
         self.bits.len()
     }
 
-    /// Bits that are set for `value`, low bit first, plus the sign.
-    pub fn encode(&self, value: f32) -> (Vec<bool>, bool) {
-        let n = self.bit_count();
-        if n == 0 {
-            return (Vec::new(), value < 0.0);
-        }
-        let steps = (1u32 << n) - 1;
-        let level = (value.abs().min(1.0) * steps as f32).round() as u32;
-        ((0..n).map(|i| level & (1 << i) != 0).collect(), value < 0.0)
+    /// The level `value` takes in the bits (bit `i` set means the `i`-th parameter is on),
+    /// and its sign.
+    pub fn encode(&self, value: f32) -> (u32, bool) {
+        let steps = (1u32 << self.bit_count()) - 1;
+        ((value.abs().min(1.0) * steps as f32).round() as u32, value < 0.0)
+    }
+
+    /// Every bool parameter with its state for `value`: the bits, low bit first, then the sign.
+    pub fn states(&self, value: f32) -> impl Iterator<Item = (&str, bool)> {
+        let (level, negative) = self.encode(value);
+        let bits = self.bits.iter().enumerate().map(move |(i, address)| (address.as_str(), level >> i & 1 == 1));
+        bits.chain(self.negative.as_deref().map(|address| (address, negative)))
     }
 }
 
 /// Name of a parameter after its `v2/` segment, e.g. `FT/v2/JawOpen` -> `JawOpen`.
-fn v2_name(path: &str) -> Option<&str> {
+pub fn v2_name(path: &str) -> Option<&str> {
     let at = path.rfind("v2/")?;
     (at == 0 || path.as_bytes()[at - 1] == b'/').then(|| &path[at + 3..])
 }
@@ -119,7 +128,8 @@ pub fn default_bindings() -> Vec<Option<Binding>> {
 
 pub struct OscSender {
     socket: UdpSocket,
-    target_key: String,
+    /// Host and port `target` was resolved from.
+    target_key: (String, u16),
     target: Option<SocketAddr>,
     last: HashMap<String, OscType>,
     last_full_send: Instant,
@@ -131,7 +141,7 @@ impl OscSender {
     pub fn new() -> Result<Self> {
         Ok(Self {
             socket: UdpSocket::bind(("0.0.0.0", 0)).context("binding OSC socket")?,
-            target_key: String::new(),
+            target_key: (String::new(), 0),
             target: None,
             last: HashMap::new(),
             last_full_send: Instant::now(),
@@ -141,12 +151,12 @@ impl OscSender {
     }
 
     pub fn set_target(&mut self, host: &str, port: u16) {
-        let key = format!("{host}:{port}");
-        if key != self.target_key {
-            self.target = key.to_socket_addrs().ok().and_then(|mut a| a.next());
-            self.target_key = key;
-            self.last.clear();
+        if self.target_key.0 == host && self.target_key.1 == port {
+            return;
         }
+        self.target = (host, port).to_socket_addrs().ok().and_then(|mut a| a.next());
+        self.target_key = (host.to_string(), port);
+        self.last.clear();
     }
 
     /// Forget what was sent so the next frame re-sends everything.
@@ -155,15 +165,23 @@ impl OscSender {
     }
 
     fn queue(&mut self, address: &str, value: OscType, force: bool) -> Result<()> {
-        if !force && self.last.get(address) == Some(&value) {
-            return Ok(());
+        match self.last.get_mut(address) {
+            Some(last) if *last == value && !force => return Ok(()),
+            Some(last) => *last = value.clone(),
+            None => {
+                self.last.insert(address.to_string(), value.clone());
+            }
         }
-        // Address, type tag and argument, each padded to 4 bytes.
-        let size = (address.len() + 4) / 4 * 4 + 4 + 4 + 16;
+        // Element size, then the address (with at least one NUL) and the type tag, each padded
+        // to 4 bytes, then the argument: four bytes for a float, none for a bool.
+        let argument = if matches!(value, OscType::Float(_)) { 4 } else { 0 };
+        let size = 4 + (address.len() / 4 + 1) * 4 + 4 + argument;
         if self.pending_bytes + size > MAX_BUNDLE_BYTES {
             self.flush()?;
         }
-        self.last.insert(address.to_string(), value.clone());
+        if self.pending.is_empty() {
+            self.pending_bytes = BUNDLE_HEADER;
+        }
         self.pending.push(OscPacket::Message(OscMessage { addr: address.to_string(), args: vec![value] }));
         self.pending_bytes += size;
         Ok(())
@@ -177,7 +195,9 @@ impl OscSender {
         self.pending_bytes = 0;
         let packet = OscPacket::Bundle(OscBundle { timetag: OscTime { seconds: 0, fractional: 1 }, content });
         let bytes = rosc::encoder::encode(&packet)?;
-        let addr = self.target.with_context(|| format!("cannot resolve OSC target {}", self.target_key))?;
+        debug_assert!(bytes.len() <= MAX_BUNDLE_BYTES, "bundle of {} bytes", bytes.len());
+        let (host, port) = &self.target_key;
+        let addr = self.target.with_context(|| format!("cannot resolve OSC target {host}:{port}"))?;
         self.socket.send_to(&bytes, addr)?;
         Ok(())
     }
@@ -202,14 +222,8 @@ impl OscSender {
                 let value = (value * 1000.0).round() / 1000.0;
                 self.queue(address, OscType::Float(value), force)?;
             }
-            if !binding.bits.is_empty() {
-                let (set, sign) = binding.encode(value);
-                for (address, on) in binding.bits.iter().zip(set) {
-                    self.queue(address, OscType::Bool(on), force)?;
-                }
-                if let Some(address) = &binding.negative {
-                    self.queue(address, OscType::Bool(sign), force)?;
-                }
+            for (address, on) in binding.states(value) {
+                self.queue(address, OscType::Bool(on), force)?;
             }
         }
         for flag in flags {
@@ -222,6 +236,7 @@ impl OscSender {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mapping::output_index;
 
     fn param(path: &str, kind: ParamType) -> AvatarParam {
         AvatarParam { path: path.into(), kind }
@@ -243,21 +258,23 @@ mod tests {
             ],
         };
         let bindings = bind(&avatar);
-        let get = |name: &str| bindings[OUTPUTS.iter().position(|p| p.name == name).unwrap()].clone();
+        let get = |name: &str| bindings[output_index(name).unwrap()].clone();
         assert_eq!(get("JawOpen"), Some(Binding::float("/avatar/parameters/FT/v2/JawOpen".into())));
         let b = get("SmileFrown").unwrap();
         assert_eq!(b.float, None);
         assert_eq!(b.bit_count(), 3);
         assert!(b.negative.is_some());
-        assert_eq!(b.encode(-1.0), (vec![true, true, true], true));
-        assert_eq!(b.encode(0.5), (vec![false, false, true], false));
+        assert_eq!(b.encode(-1.0), (0b111, true));
+        assert_eq!(b.encode(0.5), (0b100, false));
+        let states: Vec<bool> = b.states(-1.0 / 7.0).map(|(_, on)| on).collect();
+        assert_eq!(states, [true, false, false, true]);
         // Both a local float and synced bits: both are bound.
         let both = bind(&AvatarInfo {
             id: None,
             name: None,
             params: vec![param("FT/v2/JawOpen", ParamType::Float), param("FT/v2/JawOpen1", ParamType::Bool)],
         });
-        let jaw = both[OUTPUTS.iter().position(|p| p.name == "JawOpen").unwrap()].clone().unwrap();
+        let jaw = both[output_index("JawOpen").unwrap()].clone().unwrap();
         assert!(jaw.float.is_some() && jaw.bit_count() == 1);
         assert!(get("EyeX").is_none());
     }

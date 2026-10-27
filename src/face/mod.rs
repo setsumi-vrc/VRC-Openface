@@ -81,11 +81,6 @@ pub fn create_session(path: &Path, gpu_device: Option<i32>) -> Result<Session> {
     session_builder(gpu_device)?.commit_from_file(path).with_context(|| format!("loading model {}", path.display()))
 }
 
-/// A model compiled into the executable.
-pub fn create_session_from_memory(bytes: &[u8], gpu_device: Option<i32>) -> Result<Session> {
-    session_builder(gpu_device)?.commit_from_memory(bytes).context("loading the built-in model")
-}
-
 fn session_builder(gpu_device: Option<i32>) -> Result<ort::session::builder::SessionBuilder> {
     let mut builder = Session::builder(environment()?)
         .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -135,15 +130,16 @@ fn crop_tensor(frame: &RgbFrame, rect: FaceRect, size: usize, detector: bool) ->
     let m10 = sin * scale;
     let m11 = cos * scale;
     let m12 = rect.cy - (sin + cos) * rect.side * 0.5;
-    let border = if detector { Border::Constant } else { Border::Replicate };
+    // value * gain + offset: [-1, 1] for the detector, [0, 1] for the landmarks.
+    let (border, gain, offset) =
+        if detector { (Border::Constant, 1.0 / 127.5, -1.0) } else { (Border::Replicate, 1.0 / 255.0, 0.0) };
     let mut out = Vec::with_capacity(size * size * 3);
     for v in 0..size {
+        let vf = v as f32;
         for u in 0..size {
-            let (uf, vf) = (u as f32, v as f32);
+            let uf = u as f32;
             let px = frame.sample(m00 * uf + m01 * vf + m02, m10 * uf + m11 * vf + m12, border);
-            for c in px {
-                out.push(if detector { c / 127.5 - 1.0 } else { c / 255.0 });
-            }
+            out.extend(px.map(|c| c * gain + offset));
         }
     }
     out
@@ -243,10 +239,7 @@ impl FaceLandmarker {
         self.rect = Some(landmarks_rect(&points));
         self.filter.apply(&mut points, timestamp_ms);
 
-        let mut subset = Vec::with_capacity(BLENDSHAPE_POINTS.len() * 2);
-        for &i in &BLENDSHAPE_POINTS {
-            subset.extend_from_slice(&points[i][..2]);
-        }
+        let subset: Vec<f32> = BLENDSHAPE_POINTS.iter().flat_map(|&i| [points[i][0], points[i][1]]).collect();
         let tensor = Tensor::from_array(([1usize, BLENDSHAPE_POINTS.len(), 2], subset))?;
         let outputs = self.blendshapes.run(ort::inputs![tensor])?;
         let (_, values) = outputs[0].try_extract_tensor::<f32>()?;

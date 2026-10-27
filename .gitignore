@@ -1,3 +1,3 @@
 /target
-tongue_model.onnx
+models/tongue_model.onnx
 *.log

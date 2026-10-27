@@ -3,14 +3,26 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::PI;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::channels::{self, ASYMMETRIC_BY_DEFAULT, COUNT, SYMMETRY_GROUPS};
+use crate::channels::{self, ASYMMETRIC_BY_DEFAULT, COUNT, SYMMETRY_GROUPS, index};
 
 /// Mesh frown metric range that maps to 0..1 (corner drop relative to mouth width).
 const FROWN_METRIC_RANGE: (f32, f32) = (-0.03, -0.15);
 const CAPTURE_FRAMES: usize = 45;
+const FROWN: [usize; 2] = [index("mouthFrownLeft"), index("mouthFrownRight")];
+const BLINK: [usize; 2] = [index("eyeBlinkLeft"), index("eyeBlinkRight")];
+
+/// A symmetry group and its (left, right) channel pairs.
+type SymmetryGroup = (&'static str, Vec<(usize, usize)>);
+
+/// [`SYMMETRY_GROUPS`] with the channel names resolved, so a frame compares no strings.
+static SYMMETRY_PAIRS: LazyLock<Vec<SymmetryGroup>> = LazyLock::new(|| {
+    let resolve = |pairs: &[(&str, &str)]| pairs.iter().map(|(a, b)| (index(a), index(b))).collect();
+    SYMMETRY_GROUPS.iter().map(|(group, pairs)| (*group, resolve(pairs))).collect()
+});
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -22,7 +34,7 @@ pub enum Source {
 
 /// Channels with a geometric (mesh) estimate as an alternative to the model's score.
 pub fn has_mesh_source(index: usize) -> bool {
-    matches!(channels::name(index), "mouthFrownLeft" | "mouthFrownRight")
+    FROWN.contains(&index)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -113,22 +125,25 @@ pub struct Gaze {
 
 impl Gaze {
     fn from_channels(v: &[f32; COUNT]) -> Self {
-        let c = |n: &str| v[channels::index(n)];
         Gaze {
-            left_x: c("eyeLookInLeft") - c("eyeLookOutLeft"),
-            left_y: c("eyeLookUpLeft") - c("eyeLookDownLeft"),
-            right_x: c("eyeLookOutRight") - c("eyeLookInRight"),
-            right_y: c("eyeLookUpRight") - c("eyeLookDownRight"),
+            left_x: v[const { index("eyeLookInLeft") }] - v[const { index("eyeLookOutLeft") }],
+            left_y: v[const { index("eyeLookUpLeft") }] - v[const { index("eyeLookDownLeft") }],
+            right_x: v[const { index("eyeLookOutRight") }] - v[const { index("eyeLookInRight") }],
+            right_y: v[const { index("eyeLookUpRight") }] - v[const { index("eyeLookDownRight") }],
         }
     }
 
+    fn to_array(self) -> [f32; 4] {
+        [self.left_x, self.left_y, self.right_x, self.right_y]
+    }
+
+    fn from_array([left_x, left_y, right_x, right_y]: [f32; 4]) -> Self {
+        Gaze { left_x, left_y, right_x, right_y }
+    }
+
     fn minus(self, o: Gaze) -> Gaze {
-        Gaze {
-            left_x: (self.left_x - o.left_x).clamp(-1.0, 1.0),
-            left_y: (self.left_y - o.left_y).clamp(-1.0, 1.0),
-            right_x: (self.right_x - o.right_x).clamp(-1.0, 1.0),
-            right_y: (self.right_y - o.right_y).clamp(-1.0, 1.0),
-        }
+        let (a, b) = (self.to_array(), o.to_array());
+        Gaze::from_array(std::array::from_fn(|i| (a[i] - b[i]).clamp(-1.0, 1.0)))
     }
 }
 
@@ -149,26 +164,28 @@ impl AvatarCalibration {
         self.channels.get(channels::name(index)).copied().unwrap_or_default()
     }
 
-    fn pair_key(index: usize) -> Option<String> {
-        let n = channels::name(index);
-        channels::mirror(index).map(|_| n.strip_suffix("Right").map(|b| format!("{b}Left")).unwrap_or(n.to_string()))
+    /// A pair is listed in `unlinked` by its left channel.
+    fn pair_key(index: usize) -> Option<&'static str> {
+        let other = channels::mirror(index)?;
+        let left = if channels::name(index).ends_with("Left") { index } else { other };
+        Some(channels::name(left))
     }
 
     pub fn linked(&self, index: usize) -> bool {
-        Self::pair_key(index).is_some_and(|k| !self.unlinked.contains(&k))
+        Self::pair_key(index).is_some_and(|k| !self.unlinked.contains(k))
     }
 
     pub fn set_linked(&mut self, index: usize, linked: bool) {
         let Some(key) = Self::pair_key(index) else { return };
         if linked {
-            self.unlinked.remove(&key);
+            self.unlinked.remove(key);
             // Linking copies this side's calibration to the other side.
             let value = self.get(index);
             if let Some(other) = channels::mirror(index) {
                 self.put(other, value);
             }
         } else {
-            self.unlinked.insert(key);
+            self.unlinked.insert(key.to_string());
         }
     }
 
@@ -194,7 +211,7 @@ impl AvatarCalibration {
     pub fn undo_neutral(&mut self) -> bool {
         let Some(undo) = self.neutral_undo.take() else { return false };
         for (name, value) in undo {
-            if let Some(i) = (0..COUNT).find(|&i| channels::name(i) == name) {
+            if let Some(i) = channels::find(&name) {
                 self.put(i, value);
             }
         }
@@ -272,8 +289,7 @@ impl Processor {
         let mut v = *raw;
         if let Some((left, right)) = frown_metric {
             let (lo, hi) = FROWN_METRIC_RANGE;
-            for (name, metric) in [("mouthFrownLeft", left), ("mouthFrownRight", right)] {
-                let i = channels::index(name);
+            for (i, metric) in FROWN.into_iter().zip([left, right]) {
                 if settings.source(i) == Source::Mesh {
                     v[i] = ((metric - lo) / (hi - lo)).clamp(0.0, 1.0);
                 }
@@ -289,12 +305,11 @@ impl Processor {
                 *value = c.apply(*value);
             }
         }
-        for (group, pairs) in SYMMETRY_GROUPS {
+        for (group, pairs) in SYMMETRY_PAIRS.iter() {
             if !settings.group_symmetric(group) {
                 continue;
             }
-            for (a, b) in pairs {
-                let (a, b) = (channels::index(a), channels::index(b));
+            for &(a, b) in pairs {
                 let mean = (v[a] + v[b]) * 0.5;
                 v[a] = mean;
                 v[b] = mean;
@@ -313,8 +328,7 @@ impl Processor {
         match kind {
             Capture::Neutral => sum.iter_mut().zip(input).for_each(|(s, v)| *s += v),
             Capture::Gaze => {
-                let g = Gaze::from_channels(input);
-                for (s, v) in sum.iter_mut().zip([g.left_x, g.left_y, g.right_x, g.right_y]) {
+                for (s, v) in sum.iter_mut().zip(Gaze::from_channels(input).to_array()) {
                     *s += v;
                 }
             }
@@ -326,7 +340,7 @@ impl Processor {
         let mean: Vec<f32> = sum.iter().map(|s| s / *n as f32).collect();
         let outcome = match kind {
             Capture::Neutral => {
-                let blink = (mean[channels::index("eyeBlinkLeft")] + mean[channels::index("eyeBlinkRight")]) * 0.5;
+                let blink = (mean[BLINK[0]] + mean[BLINK[1]]) * 0.5;
                 if blink > 0.5 {
                     CaptureOutcome::NeutralRejected
                 } else {
@@ -346,8 +360,7 @@ impl Processor {
                 }
             }
             Capture::Gaze => {
-                calibration.gaze_center =
-                    Some(Gaze { left_x: mean[0], left_y: mean[1], right_x: mean[2], right_y: mean[3] });
+                calibration.gaze_center = Some(Gaze::from_array([mean[0], mean[1], mean[2], mean[3]]));
                 CaptureOutcome::GazeSaved
             }
         };

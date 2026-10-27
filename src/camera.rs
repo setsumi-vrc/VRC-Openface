@@ -221,12 +221,13 @@ mod platform {
                 Err(anyhow::anyhow!("short camera frame: {len} < {needed}"))
             } else {
                 let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-                let mut rgb = Vec::with_capacity(self.width * self.height * 3);
-                for y in 0..self.height {
+                let mut rgb = vec![0u8; self.width * self.height * 3];
+                for (y, out) in rgb.chunks_exact_mut(self.width * 3).enumerate() {
+                    // A negative stride means the rows are stored bottom-up.
                     let line = if self.stride >= 0 { y } else { self.height - 1 - y };
                     let src = &bytes[line * row..line * row + self.width * 4];
-                    for px in src.as_chunks::<4>().0 {
-                        rgb.extend_from_slice(&[px[2], px[1], px[0]]);
+                    for (rgb, bgra) in out.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                        *rgb = [bgra[2], bgra[1], bgra[0]];
                     }
                 }
                 Ok(RgbFrame::new(self.width, self.height, rgb))
