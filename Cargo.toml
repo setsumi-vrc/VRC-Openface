@@ -1,6 +1,6 @@
 [package]
 name = "vrc-openface"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.95"
 description = "Webcam face tracking for VRChat: MediaPipe blendshapes to Unified Expressions over OSC"
