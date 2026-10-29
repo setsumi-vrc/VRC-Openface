@@ -175,6 +175,10 @@ impl App {
         let size = Vec2::new(8.0 + 24.0 + 8.0 + text_width + 8.0 + 12.0 + 8.0, 30.0);
         let (rect, response) = ui.allocate_exact_size(size, Sense::click());
         let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+        // The list shows each language's own name; the fonts load while the pointer gets there.
+        if response.hovered() {
+            self.cjk_wanted.set(true);
+        }
         let painter = ui.painter_at(rect.expand(1.0));
         let fill = if response.hovered() { pal.hover() } else { pal.raised };
         painter.rect_filled(rect, CornerRadius::same(widgets::RADIUS), fill);

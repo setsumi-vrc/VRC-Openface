@@ -92,12 +92,25 @@ fn font_paths() -> HashMap<OsString, PathBuf> {
     found
 }
 
+/// Whether `text` has Han, kana or Hangul characters, which need the CJK fonts.
+pub(super) fn has_cjk(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c,
+            '\u{1100}'..='\u{11FF}'       // Hangul Jamo
+            | '\u{2E80}'..='\u{9FFF}'     // CJK radicals, punctuation, kana, Han
+            | '\u{AC00}'..='\u{D7AF}'     // Hangul syllables
+            | '\u{F900}'..='\u{FAFF}'     // CJK compatibility ideographs
+            | '\u{FF00}'..='\u{FFEF}'     // half- and full-width forms
+            | '\u{20000}'..='\u{2FA1F}') // Han extensions
+    })
+}
+
 /// Loads the interface fonts: Segoe UI (regular and semibold, found on every Windows; Noto Sans
-/// or DejaVu elsewhere) for the Latin and Cyrillic text, and the system's CJK fonts as fallbacks
-/// so every language renders. For Japanese, Korean and Chinese the CJK font of that language goes
-/// first: Han glyphs differ and sit on different baselines between fonts, so mixing them within
-/// one line looks broken.
-pub(super) fn load_fonts(ctx: &egui::Context, language: Language) {
+/// or DejaVu elsewhere) for the Latin and Cyrillic text, and with `cjk` the system's CJK fonts as
+/// fallbacks. Those are about 47 MB, so they load only when something on screen needs them. For
+/// Japanese, Korean and Chinese the CJK font of that language goes first: Han glyphs differ and
+/// sit on different baselines between fonts, so mixing them within one line looks broken.
+pub(super) fn load_fonts(ctx: &egui::Context, language: Language, cjk: bool) {
     let paths = font_paths();
     let load = |files: &[(&str, u32)]| {
         files.iter().find_map(|&(name, index)| {
@@ -111,11 +124,15 @@ pub(super) fn load_fonts(ctx: &egui::Context, language: Language) {
         Language::Zh => "chinese",
         _ => "",
     };
-    let mut candidates = [
-        ("japanese", load(font_files::JAPANESE)),
-        ("korean", load(font_files::KOREAN)),
-        ("chinese", load(font_files::CHINESE)),
-    ];
+    let mut candidates = if cjk {
+        [
+            ("japanese", load(font_files::JAPANESE)),
+            ("korean", load(font_files::KOREAN)),
+            ("chinese", load(font_files::CHINESE)),
+        ]
+    } else {
+        [("japanese", None), ("korean", None), ("chinese", None)]
+    };
     candidates.sort_by_key(|(name, _)| *name != preferred);
     let mut definitions = egui::FontDefinitions::default();
     let defaults = |family: &FontFamily, definitions: &egui::FontDefinitions| {

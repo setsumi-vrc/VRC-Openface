@@ -28,14 +28,20 @@ pub const OPEN_SIZE: usize = 112;
 const SIDE: f32 = 2.2;
 /// How far the crop centre sits below the mouth centre, in crop sides.
 const DROP: f32 = 0.18;
-/// Mouth corners (the subject's right, then left) and chin.
+/// Below this gap between the inner lips, relative to mouth width, the lips touch and no
+/// tongue can show, so the model does not run.
+const CLOSED_GAP: f32 = 0.05;
+/// Mouth corners (the subject's right, then left), inner lips (upper, lower) and chin.
 const CORNERS: [usize; 2] = [61, 291];
+const INNER_LIPS: [usize; 2] = [13, 14];
 const CHIN: usize = 152;
 
 /// Where the mouth is in a frame.
 struct Mouth {
     /// The square the model sees.
     rect: FaceRect,
+    /// Gap between the inner lips, in mouth widths.
+    opening: f32,
 }
 
 impl Mouth {
@@ -43,7 +49,8 @@ impl Mouth {
     /// too close together to crop.
     fn find(landmarks: &[[f32; 3]]) -> Option<Self> {
         let at = |i: usize| landmarks.get(i).map(|p| [p[0], p[1]]).filter(|p| p.iter().all(|v| v.is_finite()));
-        let (right, left, chin) = (at(CORNERS[0])?, at(CORNERS[1])?, at(CHIN)?);
+        let (right, left) = (at(CORNERS[0])?, at(CORNERS[1])?);
+        let (upper, lower, chin) = (at(INNER_LIPS[0])?, at(INNER_LIPS[1])?, at(CHIN)?);
         let across = [left[0] - right[0], left[1] - right[1]];
         let width = across[0].hypot(across[1]);
         if width < 4.0 {
@@ -61,6 +68,7 @@ impl Mouth {
         let drop = side * DROP;
         Some(Self {
             rect: FaceRect { cx: centre[0] - sin * drop, cy: centre[1] + cos * drop, side, angle },
+            opening: (lower[0] - upper[0]).hypot(lower[1] - upper[1]) / width,
         })
     }
 }
@@ -113,6 +121,10 @@ impl TongueModel {
         let Some(mouth) = Mouth::find(pixel_landmarks) else {
             return Ok(self.last);
         };
+        if mouth.opening < CLOSED_GAP {
+            self.last = [0.0; CHANNELS];
+            return Ok(self.last);
+        }
         let input = self.planar(&crop_tensor(frame, mouth.rect, self.size, false));
         let tensor = Tensor::from_array(([1usize, self.planes, self.size, self.size], input))?;
         let outputs = self.session.run(ort::inputs![tensor])?;
@@ -172,6 +184,11 @@ mod tests {
             // The crop's down, (-sin, cos), points at the chin.
             assert!(rect.angle.cos() > 0.999, "mirrored {mirrored}: angle {}", rect.angle);
         }
+    }
+
+    #[test]
+    fn opening_is_the_lip_gap_over_the_mouth_width() {
+        assert!((Mouth::find(&face(false)).unwrap().opening - 0.25).abs() < 1e-6);
     }
 
     #[test]

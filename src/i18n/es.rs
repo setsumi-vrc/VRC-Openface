@@ -123,7 +123,10 @@ pub const TEXT: &[(&str, &str)] = &[
         "tongue_stage_hint",
         "Lee la lengua a partir de un recorte de la boca una vez detectada la cara. Puede usar un dispositivo distinto al del modelo facial.",
     ),
-    ("devices_hint", "Dónde se ejecutan los modelos. Elige un dispositivo para ambos o configura cada modelo abajo."),
+    (
+        "devices_hint",
+        "Dónde se ejecutan los modelos. Elige un dispositivo para ambos o configura cada modelo abajo. Automático usa la CPU, que necesita mucha menos memoria que una GPU.",
+    ),
     ("enable_tongue", "Activa Lengua para empezar a procesar."),
     ("tongue_model", "Modelo de lengua"),
     ("import_tongue", "Importar modelo de lengua…"),

@@ -63,7 +63,8 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
-            let commands = tracker::spawn(shared.clone(), sources, models.clone(), move || ctx.request_repaint());
+            let commands =
+                tracker::spawn(shared.clone(), sources, models.clone(), move |after| ctx.request_repaint_after(after));
             Ok(Box::new(app::App::new(cc, shared, commands, models)))
         }),
     )

@@ -27,8 +27,8 @@
 
 ---
 
-VRC Openface runs Google's MediaPipe face landmarker on ONNX Runtime (on your GPU through
-DirectML on Windows, or on the CPU), turns its 52 blendshapes into
+VRC Openface runs Google's MediaPipe face landmarker on ONNX Runtime (on the CPU, or on your
+GPU through DirectML on Windows), turns its 52 blendshapes into
 [VRCFaceTracking](https://github.com/benaclejames/VRCFaceTracking) **Unified Expressions** and
 sends them to VRChat over OSC, 100 times a second.
 
@@ -125,8 +125,9 @@ closing the window keeps tracking running in the system tray.
 <summary><b>Tracking</b></summary>
 
 - MediaPipe face detection, 478-point face mesh and 52 blendshapes at the camera frame rate.
-- GPU inference through DirectML on Windows, with an automatic fallback to the CPU. Face and
-  tongue can run on different devices. Linux runs on the CPU.
+- Runs on the CPU by default: the models are small, and a GPU (DirectML, Windows only) costs
+  about 450 MB of memory for under a millisecond a frame. Face and tongue can each be moved to
+  a GPU in Settings.
 - **Tongue tracking** with an imported ONNX model ([details](models/README.md)).
 - A geometric (mesh) frown estimate, because the model's own frown score rarely moves.
 
@@ -248,4 +249,4 @@ uv run tools/make_flags.py                                       # rebuild the l
 ## 📜 License
 
 The code is [MIT](LICENSE) licensed. The face models in `models/` are Google's MediaPipe models
-(Apache 2.0); see [models/README.md](models/README.md) for them and for the tongue model.
+(Apache 2.0); see [models/README.md](models/README.md) for them and for what a tongue model needs.

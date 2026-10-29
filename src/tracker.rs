@@ -117,6 +117,9 @@ impl Default for Snapshot {
     }
 }
 
+/// Time between redraws while the window does not have the focus.
+const BACKGROUND_REDRAW: Duration = Duration::from_millis(100);
+
 pub struct Shared {
     pub settings: RwLock<Settings>,
     pub calibrations: Mutex<CalibrationStore>,
@@ -125,6 +128,8 @@ pub struct Shared {
     pub perf: Arc<Mutex<Perf>>,
     /// False while the interface sleeps; the tracker then stops requesting repaints.
     pub ui_awake: AtomicBool,
+    /// False while another window has the focus; the tracker then asks for fewer repaints.
+    pub ui_focused: AtomicBool,
     pub receive_port: Arc<AtomicU16>,
     pub gpus: Vec<GpuAdapter>,
     /// The preview is shown unblurred until this time (set by hovering the preview).
@@ -141,6 +146,7 @@ impl Shared {
             snapshot: Mutex::new(Snapshot::default()),
             perf: Arc::default(),
             ui_awake: AtomicBool::new(true),
+            ui_focused: AtomicBool::new(true),
             receive_port: Arc::new(AtomicU16::new(port)),
             gpus: system::gpu_adapters(),
             unblurred_until: Mutex::new(None),
@@ -158,7 +164,7 @@ pub fn spawn(
     shared: Arc<Shared>,
     sources: Sources,
     model_dir: PathBuf,
-    repaint: impl Fn() + Send + 'static,
+    repaint: impl Fn(Duration) + Send + 'static,
 ) -> Sender<Command> {
     let (tx, rx) = crossbeam_channel::unbounded();
     thread::Builder::new()
@@ -167,7 +173,10 @@ pub fn spawn(
             let awake = shared.clone();
             let repaint = move || {
                 if awake.ui_awake.load(Ordering::Relaxed) {
-                    repaint();
+                    // With VRChat in front the window is seen at a glance at most: its values
+                    // keep moving, at a third of the camera rate.
+                    let focused = awake.ui_focused.load(Ordering::Relaxed);
+                    repaint(if focused { Duration::ZERO } else { BACKGROUND_REDRAW });
                 }
             };
             Tracker::new(shared, sources, model_dir, rx).run(repaint)
@@ -199,13 +208,13 @@ impl FpsCounter {
     }
 }
 
-/// Auto picks the first hardware GPU; DirectML device ids are DXGI adapter indices.
-fn resolve(device: Device, gpus: &[GpuAdapter]) -> Option<u32> {
+/// Auto runs on the CPU: the models are small enough that DirectML saved under a
+/// millisecond a frame while its device took about 450 MB. DirectML device ids are DXGI
+/// adapter indices.
+fn resolve(device: Device) -> Option<u32> {
     match device {
-        Device::Cpu => None,
+        Device::Auto | Device::Cpu => None,
         Device::Gpu(i) => Some(i),
-        Device::Auto if cfg!(feature = "directml") => gpus.first().map(|g| g.index),
-        Device::Auto => None,
     }
 }
 
@@ -369,7 +378,7 @@ impl Tracker {
     }
 
     fn ensure_models(&mut self, settings: &Settings) -> Result<(), Status> {
-        let face_gpu = resolve(settings.face_device, &self.shared.gpus);
+        let face_gpu = resolve(settings.face_device);
         if self.landmarker.is_none() || self.face_gpu != Some(face_gpu) {
             self.landmarker = None;
             self.face_gpu = Some(face_gpu);
@@ -395,7 +404,7 @@ impl Tracker {
             self.unload_tongue();
             return;
         }
-        let gpu = resolve(settings.tongue_device, &self.shared.gpus);
+        let gpu = resolve(settings.tongue_device);
         if self.tongue_gpu == Some(gpu) && self.tongue_status != TongueStatus::Off {
             return;
         }

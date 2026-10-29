@@ -128,7 +128,7 @@ pub const TEXT: &[(&str, &str)] = &[
     ),
     (
         "devices_hint",
-        "Onde os modelos são executados. Escolha um dispositivo para ambos ou configure cada modelo abaixo.",
+        "Onde os modelos são executados. Escolha um dispositivo para ambos ou configure cada modelo abaixo. Automático usa a CPU, que precisa de muito menos memória que uma GPU.",
     ),
     ("enable_tongue", "Ative Língua para começar a processar."),
     ("tongue_model", "Modelo de língua"),

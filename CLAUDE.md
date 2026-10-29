@@ -45,7 +45,8 @@ Threads:
 - **UI** (`app/`, eframe/egui 0.37, `App::ui` API): draws from a cloned `Snapshot`,
   edits `Settings` and the per-avatar `CalibrationStore` in `Shared`, and saves both
   every 2 s when they change. It sends `Command`s (capture neutral, undo, gaze, reload
-  models) to the tracker. When idle it stops drawing (`ui_awake`).
+  models) to the tracker. When idle or minimized it stops drawing (`ui_awake`); without the
+  focus the tracker asks for a redraw every `BACKGROUND_REDRAW` (`ui_focused`).
 - **Tracker** (`tracker.rs`): camera → `FaceLandmarker` → optional `TongueModel` →
   `Processor` → `Mapper` → pushes a `Frame` into the output feed and updates `Snapshot`.
   It also merges avatar information (see below) and records stage timings in `perf.rs`.
@@ -74,7 +75,11 @@ Mirrors MediaPipe's face landmarker graph:
 - Tongue: a square mouth crop turned with the mouth corners and reaching below the lower
   lip (`Mouth::find`), sampled like the face crops; the model's input sets the crop size and
   planes (luma or RGB), and its six outputs are the tongue channels.
-- ONNX Runtime allows one environment per process; `face::environment()` shares it.
+- ONNX Runtime allows one environment per process; `face::environment()` shares it. Sessions
+  use one intra-op thread and no memory pattern (both measured cheaper); `Device::Auto` is the
+  CPU (DirectML: about 450 MB for under 1 ms a frame).
+- While no face is tracked the detector runs on every `SEARCH_EVERY`-th frame; the tongue model
+  skips frames whose inner lips touch (`CLOSED_GAP`).
 
 Validate pipeline changes against the official MediaPipe Python package on the same
 image (mean blendshape difference ≈ 0.01 when this was written).
@@ -102,9 +107,13 @@ image (mean blendshape difference ≈ 0.01 when this was written).
 ### Camera (`camera.rs`)
 
 Windows uses Media Foundation directly: it ranks native modes (fps ≥ requested, then
-closest area, then MJPG > NV12 > YUY2) and asks the source reader for RGB32, scaled to
-the requested width when the camera only offers large modes. nokhwa (V4L2 on Linux) is used only on
-other platforms; its MSMF backend misreported modes and delivered about 12 FPS on a Brio 500.
+closest area, then NV12 > YUY2 > MJPG) and reads NV12 or YUY2 as delivered (MJPEG decoded
+to one of them). `camera/yuv.rs` converts to RGB and shrinks by a whole factor towards the
+requested width (luma block average). The reader is asynchronous (`Callback` asks for the next
+frame as each arrives; the tracker gets the newest). The video processor's RGB32 path remains
+for other formats only: it made up frames (a camera at 15 FPS in low light came out at 30).
+nokhwa (V4L2 on Linux) is used only on other platforms; its MSMF backend misreported modes and
+delivered about 12 FPS on a Brio 500.
 
 ### Interface details (`app/`)
 
@@ -128,7 +137,9 @@ other platforms; its MSMF backend misreported modes and delivered about 12 FPS o
   in UI text: Segoe UI lacks them and they show as boxes. Add a `Glyph` instead.
 - Fonts: `font_files` lists the files per role and system (Windows fonts; Noto Sans, Noto Sans CJK
   (one `.ttc`, faces 0/1/2 = JA/KO/SC) or DejaVu on Linux), found by name under the font folders
-  (`font_paths`). `load_fonts` puts Segoe UI first (and its semibold as the `semibold` family) for
+  (`font_paths`). The CJK fonts (about 47 MB) load only when needed (`App::fonts`): a CJK language,
+  the language menu hovered, or `has_cjk` text in the avatar, camera, GPU or profile names or the
+  search and profile fields; once loaded they stay. `load_fonts` puts Segoe UI first (and its semibold as the `semibold` family) for
   non-CJK languages; Japanese, Korean and Chinese put their own CJK font first. A language's own
   name uses `native_font` so its text stays in one font.
 - Panel style: rounded cards (`panel_frame`), 30 px rows with a 3 px value bar under the name

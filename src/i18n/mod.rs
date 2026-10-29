@@ -30,6 +30,11 @@ pub enum Language {
 }
 
 impl Language {
+    /// Japanese, Korean and Chinese, which need the CJK fonts.
+    pub fn is_cjk(self) -> bool {
+        matches!(self, Language::Ja | Language::Ko | Language::Zh)
+    }
+
     pub const ALL: [Language; 10] = [
         Language::En,
         Language::Es,
@@ -295,9 +300,9 @@ const TEXT: &[(&str, &str, &str, &str)] = &[
     ),
     (
         "devices_hint",
-        "Where the models run. Pick one device here for both, or set each model below.",
-        "モデルを実行するデバイスです。ここで両方をまとめて選ぶか、下で個別に設定します。",
-        "모델이 실행되는 장치입니다. 여기서 둘 다 한 번에 고르거나 아래에서 각각 설정하세요.",
+        "Where the models run. Pick one device here for both, or set each model below. Auto uses the CPU, which needs far less memory than a GPU.",
+        "モデルを実行するデバイスです。ここで両方をまとめて選ぶか、下で個別に設定します。自動ではCPUを使います。GPUよりメモリの使用量がずっと少なくなります。",
+        "모델이 실행되는 장치입니다. 여기서 둘 다 한 번에 고르거나 아래에서 각각 설정하세요. 자동은 CPU를 사용하며, GPU보다 메모리를 훨씬 적게 씁니다.",
     ),
     ("tongue_model", "Tongue model", "舌モデル", "혀 모델"),
     ("import_tongue", "Import tongue model…", "舌モデルを読み込む…", "혀 모델 가져오기…"),

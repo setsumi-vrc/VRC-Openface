@@ -1,6 +1,9 @@
-//! Webcam capture. Windows uses Media Foundation directly, so we can choose the
-//! camera's native mode (usually MJPEG) and let the system decode it to RGB.
-//! Other platforms go through nokhwa.
+//! Webcam capture. Windows uses Media Foundation directly: frames come in the camera's
+//! own YUV format and `yuv` converts and shrinks them to the requested width. Other
+//! platforms go through nokhwa.
+
+#[cfg(windows)]
+mod yuv;
 
 use crate::image::RgbFrame;
 
@@ -14,13 +17,17 @@ pub use platform::{CameraSource, list};
 
 #[cfg(windows)]
 mod platform {
-    use std::sync::Once;
+    use std::sync::{Arc, Once};
+    use std::time::Duration;
 
     use anyhow::{Context, Result, bail};
+    use crossbeam_channel::{Receiver, Sender, TrySendError};
+    use parking_lot::Mutex;
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree};
-    use windows::core::{GUID, PWSTR};
+    use windows::core::{GUID, HRESULT, PWSTR, Ref, implement};
 
+    use super::yuv::{self, Layout, Matrix};
     use super::{CameraEntry, RgbFrame};
 
     const STREAM: u32 = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
@@ -122,17 +129,85 @@ mod platform {
         modes
     }
 
+    /// What the reader hands over. Media Foundation objects are free-threaded.
+    enum Delivery {
+        Frame(IMFSample),
+        Ended,
+        Failed(HRESULT),
+    }
+
+    unsafe impl Send for Delivery {}
+
+    /// The reader, shared with its callback so the callback can ask for the next frame.
+    type ReaderSlot = Arc<Mutex<Option<IMFSourceReader>>>;
+
+    /// Takes each frame on Media Foundation's thread and asks for the next one at once, so a
+    /// request is always pending while the tracker works on the previous frame.
+    #[implement(IMFSourceReaderCallback)]
+    struct Callback {
+        reader: ReaderSlot,
+        frames: Sender<Delivery>,
+        /// The other end, to throw away a frame the tracker has not taken yet.
+        stale: Receiver<Delivery>,
+    }
+
+    impl IMFSourceReaderCallback_Impl for Callback_Impl {
+        fn OnReadSample(
+            &self,
+            status: HRESULT,
+            _stream: u32,
+            flags: u32,
+            _timestamp: i64,
+            sample: Ref<IMFSample>,
+        ) -> windows::core::Result<()> {
+            let delivery = if status.is_err() {
+                Some(Delivery::Failed(status))
+            } else if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                Some(Delivery::Ended)
+            } else {
+                // Stream ticks and format changes arrive without a sample.
+                sample.ok().ok().cloned().map(Delivery::Frame)
+            };
+            if !matches!(delivery, Some(Delivery::Ended | Delivery::Failed(_)))
+                && let Some(reader) = &*self.reader.lock()
+            {
+                unsafe { reader.ReadSample(STREAM, 0, None, None, None, None)? };
+            }
+            if let Some(delivery) = delivery
+                && let Err(TrySendError::Full(delivery)) = self.frames.try_send(delivery)
+            {
+                // Only the newest frame matters.
+                let _ = self.stale.try_recv();
+                let _ = self.frames.try_send(delivery);
+            }
+            Ok(())
+        }
+
+        fn OnFlush(&self, _stream: u32) -> windows::core::Result<()> {
+            Ok(())
+        }
+
+        fn OnEvent(&self, _stream: u32, _event: Ref<IMFMediaEvent>) -> windows::core::Result<()> {
+            Ok(())
+        }
+    }
+
     pub struct CameraSource {
         source: IMFMediaSource,
-        reader: IMFSourceReader,
+        reader: ReaderSlot,
+        frames: Receiver<Delivery>,
+        layout: Layout,
         width: usize,
         height: usize,
         stride: isize,
-        /// Time the last frame took to copy into an RGB frame, for the debug view.
+        /// Frames are shrunk by this whole factor towards the requested width.
+        factor: usize,
+        matrix: Matrix,
+        /// Time the last frame took to convert into an RGB frame, for the debug view.
         pub convert_ms: f32,
     }
 
-    // The source reader is free-threaded; the camera is only used from the tracker thread.
+    // Media Foundation objects are free-threaded; the camera is only used from the tracker thread.
     unsafe impl Send for CameraSource {}
 
     impl CameraSource {
@@ -144,16 +219,21 @@ mod platform {
                 MFCreateAttributes(&mut attributes, 1)?;
                 let attributes = attributes.context("no attributes")?;
                 attributes.SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)?;
+                let slot = ReaderSlot::default();
+                let (tx, rx) = crossbeam_channel::bounded(1);
+                let callback: IMFSourceReaderCallback =
+                    Callback { reader: slot.clone(), frames: tx, stale: rx.clone() }.into();
+                attributes.SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, &callback)?;
                 let reader = MFCreateSourceReaderFromMediaSource(&source, &attributes)?;
 
                 // Prefer modes that reach the requested frame rate, then the closest
-                // resolution, then compressed formats that leave USB bandwidth spare.
+                // resolution, then formats that need no decoding.
                 let target = (width * height) as i64;
                 let rank = |m: &NativeMode| {
                     let format = match m.subtype {
-                        s if s == MFVideoFormat_MJPG => 0,
-                        s if s == MFVideoFormat_NV12 => 1,
-                        s if s == MFVideoFormat_YUY2 => 2,
+                        s if s == MFVideoFormat_NV12 => 0,
+                        s if s == MFVideoFormat_YUY2 => 1,
+                        s if s == MFVideoFormat_MJPG => 2,
                         _ => 3,
                     };
                     (m.fps + 0.5 < fps as f32, ((m.width * m.height) as i64 - target).abs(), format, -(m.fps as i32))
@@ -165,49 +245,87 @@ mod platform {
                 let mode = modes.iter().min_by_key(|m| rank(m)).context("camera reports no video modes")?;
                 reader.SetCurrentMediaType(STREAM, None, &mode.media_type)?;
 
+                // NV12 and YUY2 come as they are, MJPEG decoded to one of them, and `yuv`
+                // converts and shrinks them. The video processor's RGB32 path (kept for other
+                // formats) cost as much per frame and also made up frames: a camera that slows
+                // to 15 FPS in low light came out at 30, every frame twice through the models.
+                let yuv_native = [MFVideoFormat_NV12, MFVideoFormat_YUY2].contains(&mode.subtype);
                 let output = MFCreateMediaType()?;
                 output.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-                output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
-                // Cameras that only offer large modes are scaled down by the video
-                // processor to the requested width, keeping the native aspect ratio.
-                if mode.width > width && mode.height > 0 {
-                    let scaled_height = ((width as u64 * mode.height as u64 / mode.width as u64) as u32 + 1) & !1;
-                    output.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | scaled_height as u64)?;
-                    if reader.SetCurrentMediaType(STREAM, None, &output).is_err() {
-                        output.DeleteItem(&MF_MT_FRAME_SIZE)?;
+                let yuv = yuv_native
+                    || [MFVideoFormat_NV12, MFVideoFormat_YUY2].into_iter().any(|subtype| {
+                        output.SetGUID(&MF_MT_SUBTYPE, &subtype).is_ok()
+                            && reader.SetCurrentMediaType(STREAM, None, &output).is_ok()
+                    });
+                if !yuv {
+                    output.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)?;
+                    // Cameras that only offer large modes are scaled down by the video
+                    // processor to the requested width, keeping the native aspect ratio.
+                    if mode.width > width && mode.height > 0 {
+                        let scaled_height = ((width as u64 * mode.height as u64 / mode.width as u64) as u32 + 1) & !1;
+                        output.SetUINT64(&MF_MT_FRAME_SIZE, ((width as u64) << 32) | scaled_height as u64)?;
+                        if reader.SetCurrentMediaType(STREAM, None, &output).is_err() {
+                            output.DeleteItem(&MF_MT_FRAME_SIZE)?;
+                        }
                     }
+                    reader
+                        .SetCurrentMediaType(STREAM, None, &output)
+                        .context("camera mode cannot be converted to RGB")?;
                 }
-                reader.SetCurrentMediaType(STREAM, None, &output).context("camera mode cannot be converted to RGB")?;
 
                 let current = reader.GetCurrentMediaType(STREAM)?;
                 let (w, h) = split(current.GetUINT64(&MF_MT_FRAME_SIZE)?);
-                let stride =
-                    current.GetUINT32(&MF_MT_DEFAULT_STRIDE).map(|s| s as i32 as isize).unwrap_or(w as isize * 4);
+                let (layout, bytes_per_pixel) = match current.GetGUID(&MF_MT_SUBTYPE)? {
+                    s if s == MFVideoFormat_NV12 => (Layout::Nv12, 1),
+                    s if s == MFVideoFormat_YUY2 => (Layout::Yuy2, 2),
+                    _ => (Layout::Bgra, 4),
+                };
+                let stride = current
+                    .GetUINT32(&MF_MT_DEFAULT_STRIDE)
+                    .map(|s| s as i32 as isize)
+                    .unwrap_or((w * bytes_per_pixel) as isize);
+                // Media Foundation's own default: BT.709 from 720 lines up.
+                let matrix = match current.GetUINT32(&MF_MT_YUV_MATRIX) {
+                    Ok(m) if m == MFVideoTransferMatrix_BT601.0 as u32 => Matrix::BT601,
+                    Ok(m) if m == MFVideoTransferMatrix_BT709.0 as u32 => Matrix::BT709,
+                    _ if h >= 720 => Matrix::BT709,
+                    _ => Matrix::BT601,
+                };
+                let factor = if layout == Layout::Bgra { 1 } else { (w / width.max(1)).max(1) as usize };
                 log::info!(
-                    "camera {index} opened at {w}x{h} {:.0} FPS ({}), {} native modes",
+                    "camera {index} opened at {w}x{h} {:.0} FPS ({} as {layout:?}, shrunk {factor}x), {} native modes",
                     mode.fps,
                     subtype_name(mode.subtype),
                     modes.len()
                 );
-                Ok(Self { source, reader, width: w as usize, height: h as usize, stride, convert_ms: 0.0 })
+                reader.ReadSample(STREAM, 0, None, None, None, None)?;
+                *slot.lock() = Some(reader);
+                Ok(Self {
+                    source,
+                    reader: slot,
+                    frames: rx,
+                    layout,
+                    width: w as usize,
+                    height: h as usize,
+                    stride,
+                    factor,
+                    matrix,
+                    convert_ms: 0.0,
+                })
             }
         }
 
         pub fn read(&mut self) -> Result<RgbFrame> {
-            loop {
-                let mut flags = 0u32;
-                let mut sample = None;
-                unsafe { self.reader.ReadSample(STREAM, 0, None, Some(&mut flags), None, Some(&mut sample))? };
-                if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                    bail!("camera stream ended");
-                }
-                // Stream ticks and format changes arrive without a sample.
-                let Some(sample) = sample else { continue };
-                let started = std::time::Instant::now();
-                let frame = unsafe { self.convert(&sample) };
-                self.convert_ms = started.elapsed().as_secs_f32() * 1000.0;
-                return frame;
-            }
+            let sample = match self.frames.recv_timeout(Duration::from_secs(2)) {
+                Ok(Delivery::Frame(sample)) => sample,
+                Ok(Delivery::Ended) => bail!("camera stream ended"),
+                Ok(Delivery::Failed(status)) => bail!("camera read failed: {status}"),
+                Err(_) => bail!("no frame from the camera for 2 s"),
+            };
+            let started = std::time::Instant::now();
+            let frame = unsafe { self.convert(&sample) };
+            self.convert_ms = started.elapsed().as_secs_f32() * 1000.0;
+            frame
         }
 
         unsafe fn convert(&self, sample: &IMFSample) -> Result<RgbFrame> {
@@ -215,32 +333,30 @@ mod platform {
             let mut data = std::ptr::null_mut();
             let mut len = 0u32;
             unsafe { buffer.Lock(&mut data, None, Some(&mut len))? };
-            let row = self.stride.unsigned_abs();
-            let needed = row * self.height;
-            let result = if (len as usize) < needed || row < self.width * 4 {
-                Err(anyhow::anyhow!("short camera frame: {len} < {needed}"))
-            } else {
-                let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
-                let mut rgb = vec![0u8; self.width * self.height * 3];
-                for (y, out) in rgb.chunks_exact_mut(self.width * 3).enumerate() {
-                    // A negative stride means the rows are stored bottom-up.
-                    let line = if self.stride >= 0 { y } else { self.height - 1 - y };
-                    let src = &bytes[line * row..line * row + self.width * 4];
-                    for (rgb, bgra) in out.as_chunks_mut::<3>().0.iter_mut().zip(src.as_chunks::<4>().0) {
-                        *rgb = [bgra[2], bgra[1], bgra[0]];
-                    }
-                }
-                Ok(RgbFrame::new(self.width, self.height, rgb))
+            let frame = yuv::Frame {
+                layout: self.layout,
+                data: unsafe { std::slice::from_raw_parts(data, len as usize) },
+                width: self.width,
+                height: self.height,
+                stride: self.stride,
             };
+            let mut rgb = Vec::new();
+            let size = yuv::to_rgb(&frame, self.factor, self.matrix, &mut rgb);
             unsafe { buffer.Unlock()? };
-            result
+            let (width, height) = size.with_context(|| format!("short camera frame: {len} bytes"))?;
+            Ok(RgbFrame::new(width, height, rgb))
         }
     }
 
     impl Drop for CameraSource {
         fn drop(&mut self) {
+            // Taking the reader out of the callback's slot also ends the cycle between them.
+            if let Some(reader) = self.reader.lock().take() {
+                unsafe {
+                    let _ = reader.Flush(MF_SOURCE_READER_ALL_STREAMS.0 as u32);
+                }
+            }
             unsafe {
-                let _ = self.reader.Flush(MF_SOURCE_READER_ALL_STREAMS.0 as u32);
                 let _ = self.source.Shutdown();
             }
         }

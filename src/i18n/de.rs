@@ -122,7 +122,7 @@ pub const TEXT: &[(&str, &str)] = &[
     ),
     (
         "devices_hint",
-        "Wo die Modelle laufen. Wähle hier ein Gerät für beide oder stelle jedes Modell unten einzeln ein.",
+        "Wo die Modelle laufen. Wähle hier ein Gerät für beide oder stelle jedes Modell unten einzeln ein. Automatisch nutzt die CPU, die viel weniger Speicher braucht als eine GPU.",
     ),
     ("enable_tongue", "Aktiviere Zunge, um die Verarbeitung zu starten."),
     ("tongue_model", "Zungenmodell"),

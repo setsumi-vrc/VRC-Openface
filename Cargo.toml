@@ -59,6 +59,8 @@ windows = { version = "0.62", features = [
     "Win32_UI_Controls",
     "Win32_UI_WindowsAndMessaging",
 ] }
+# `#[implement]` (the camera's reader callback) names this crate in its expansion.
+windows-core = "0.62"
 # The updater installs the release zip.
 zip = { version = "9.1", default-features = false, features = ["deflate"] }
 

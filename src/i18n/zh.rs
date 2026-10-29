@@ -93,7 +93,10 @@ pub const TEXT: &[(&str, &str)] = &[
     ("capture_hint", "摄像头读取时间包含等待下一帧的时间。"),
     ("mediapipe_hint", "检测人脸并读取 52 个表情数值。自动模式在 GPU 可用时使用 GPU，否则使用 CPU。"),
     ("tongue_stage_hint", "在检测到人脸后，根据嘴部裁剪图读取舌头。可以与人脸模型使用不同的设备运行。"),
-    ("devices_hint", "模型运行的位置。在此为两个模型选择同一设备，或在下方分别设置。"),
+    (
+        "devices_hint",
+        "模型运行的位置。在此为两个模型选择同一设备，或在下方分别设置。自动使用 CPU，占用的内存比 GPU 少得多。",
+    ),
     ("enable_tongue", "启用舌头以开始处理。"),
     ("tongue_model", "舌头模型"),
     ("import_tongue", "导入舌头模型…"),

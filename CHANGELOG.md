@@ -13,9 +13,18 @@ Versions follow `MAJOR.MINOR.PATCH`:
 ## [Unreleased]
 
 ### Added
-- **Linux** (x86_64): a `VRC-Openface-x.y.z-linux-x86_64.tar.gz` download with the same app, first published with 0.7.0. It runs on the CPU (DirectML is Windows only), opens the camera through V4L2, uses the Noto (Sans and Sans CJK) or DejaVu fonts, reads avatar configs from VRChat's Proton prefix, and updates itself from that archive. Linux has no tray icon, so the close-to-tray switch is hidden there.
+- **Linux** (x86_64): a `VRC-Openface-x.y.z-linux-x86_64.tar.gz` download with the same app. It runs on the CPU (DirectML is Windows only), opens the camera through V4L2, uses the Noto (Sans and Sans CJK) or DejaVu fonts, reads avatar configs from VRChat's Proton prefix, and updates itself from that archive. Linux has no tray icon, so the close-to-tray switch is hidden there.
 
 ### Changed
+- **Tongue: a new model format** ([models/README.md](models/README.md)). The crop the model reads is turned with the mouth corners, so it follows a tilted head, and reaches below the lower lip where a tongue that sticks out ends up; on a mirrored camera the chin stays at the bottom. Its size and colour (luma or RGB) come from the model itself. A model that does not fit is reported when it is imported, with the reason, instead of failing on every frame. Models made for earlier versions do not load, and no tongue model is included.
+- The tongue values are no longer averaged a second time before the app's own smoothing, so they follow the tongue with less delay.
+- **About a third of the memory and less CPU.** Measured on Windows with the camera dark, the app went from 690 MB to 216 MB and from 12 % to 6 % of one core minimized (20 % to 12.5 % with the window open), with 25 threads instead of 59:
+  - **Auto** runs the models on the CPU. On these small models DirectML was under a millisecond faster a frame while its device took about 450 MB. With a face in view the CPU now does that work itself (about 2 ms of CPU a frame more than with DirectML); a GPU can still be chosen in Settings.
+  - ONNX Runtime runs each model on one thread (a second thread cost 30 % more CPU time), without its planned buffer layout (8 MB).
+  - The tongue model does not run while the lips are closed, and while no face is found the face detector runs on every third frame instead of every frame.
+  - The camera's own YUV frames are converted and shrunk by the app, read as the camera delivers them. The old RGB path also made up frames: a camera that slows to 15 FPS in low light came out at 30, every frame twice through the models.
+  - The window draws nothing while minimized and redraws ten times a second while another window has the focus.
+  - The Japanese, Korean and Chinese fonts (about 47 MB) load only when something on screen needs them: a CJK language, the language menu, or an avatar, camera or profile name written in CJK.
 - The updater picks the download for its own system. Other systems' archives are never zips, so versions up to 0.7.0 (which take the first zip of a release) stay on the Windows one.
 - The README is reorganized, up to date with the current interface, and explains how to let several apps use the camera at once.
 

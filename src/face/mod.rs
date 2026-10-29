@@ -82,15 +82,20 @@ pub fn create_session(path: &Path, gpu_device: Option<i32>) -> Result<Session> {
 }
 
 fn session_builder(gpu_device: Option<i32>) -> Result<ort::session::builder::SessionBuilder> {
+    // One thread: these models are small, and a second thread cost 30 % more CPU time for
+    // 0.4 ms less latency on the landmark model (no thread pool, no wake-ups).
     let mut builder = Session::builder(environment()?)
         .map_err(|e| anyhow::anyhow!("{e}"))?
-        .with_intra_threads(2)
+        .with_intra_threads(1)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_inter_threads(1)
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_config_entry("session.intra_op.allow_spinning", "0")
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_config_entry("session.inter_op.allow_spinning", "0")
+        .map_err(|e| anyhow::anyhow!("{e}"))?
+        // The planned buffer layout kept 8 MB around for about 2 % of the run time.
+        .with_memory_pattern(false)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if let Some(device) = gpu_device {
         builder = with_gpu(builder, device)?;
@@ -165,11 +170,17 @@ fn landmarks_rect(points: &[[f32; 3]]) -> FaceRect {
     }
 }
 
+/// While no face is tracked, the detector runs on one frame in this many (10 Hz at 30 FPS):
+/// finding a face again a few frames later is not noticeable, searching every frame is.
+const SEARCH_EVERY: u32 = 3;
+
 pub struct FaceLandmarker {
     detector: FaceDetector,
     landmarks: Session,
     blendshapes: Session,
     rect: Option<FaceRect>,
+    /// Frames since the face was lost, for [`SEARCH_EVERY`].
+    searching: u32,
     image_size: (usize, usize),
     filter: LandmarkFilter,
 }
@@ -181,6 +192,7 @@ impl FaceLandmarker {
             landmarks: create_session(&model_dir.join("face_landmarks_detector.onnx"), gpu_device)?,
             blendshapes: create_session(&model_dir.join("face_blendshapes.onnx"), gpu_device)?,
             rect: None,
+            searching: 0,
             image_size: (0, 0),
             filter: LandmarkFilter::default(),
         })
@@ -199,7 +211,14 @@ impl FaceLandmarker {
         }
         let rect = match self.rect {
             Some(rect) => Some(rect),
-            None => self.detector.detect(frame)?,
+            None => {
+                let skip = !self.searching.is_multiple_of(SEARCH_EVERY);
+                self.searching = self.searching.wrapping_add(1);
+                if skip {
+                    return Ok(None);
+                }
+                self.detector.detect(frame)?
+            }
         };
         let Some(rect) = rect.filter(FaceRect::is_valid) else {
             self.lose_track();
@@ -237,6 +256,7 @@ impl FaceLandmarker {
         drop(outputs);
 
         self.rect = Some(landmarks_rect(&points));
+        self.searching = 0;
         self.filter.apply(&mut points, timestamp_ms);
 
         let subset: Vec<f32> = BLENDSHAPE_POINTS.iter().flat_map(|&i| [points[i][0], points[i][1]]).collect();

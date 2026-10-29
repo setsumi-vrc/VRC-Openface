@@ -10,6 +10,7 @@ mod rows;
 mod settings;
 mod style;
 
+use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ use crate::tracker::{Command, Shared, Snapshot, Status};
 use crate::ui::theme::{CustomColors, Palette, Scheme};
 use crate::ui::widgets;
 use crate::updater::Release;
-use style::{FLAGS, apply_style, load_fonts, load_png};
+use style::{FLAGS, apply_style, has_cjk, load_fonts, load_png};
 
 const RESOLUTIONS: [(u32, u32); 4] = [(640, 480), (848, 480), (1280, 720), (1920, 1080)];
 const CAMERA_RATES: [u32; 2] = [30, 60];
@@ -160,8 +161,10 @@ pub struct App {
     narrow: bool,
     /// Last tracker frame counted in the interface latencies.
     seen_frame: u64,
-    /// Language the CJK font order was built for.
-    font_language: Language,
+    /// Language the font order was built for, and whether the CJK fonts are in.
+    fonts: (Language, bool),
+    /// Set while the language menu is pointed at: it shows every language's own name.
+    cjk_wanted: Cell<bool>,
     /// Tray icon; closing the window hides it there instead of quitting.
     tray: Option<crate::ui::tray::Tray>,
 }
@@ -180,7 +183,7 @@ impl App {
         let saved = shared.settings.read().clone();
         let tray = crate::ui::tray::Tray::new(cc, shared.clone());
         let language = saved.language;
-        load_fonts(&cc.egui_ctx, language);
+        load_fonts(&cc.egui_ctx, language, language.is_cjk());
         let pal = Palette::of(saved.scheme, &saved.custom_colors);
         Self {
             shared,
@@ -229,9 +232,23 @@ impl App {
             reveal_started: None,
             narrow: false,
             seen_frame: 0,
-            font_language: language,
+            fonts: (language, language.is_cjk()),
+            cjk_wanted: Cell::new(false),
             tray,
         }
+    }
+
+    /// Names from outside the app that may be written in CJK: the avatar, cameras, GPUs,
+    /// profiles, and what was typed into the search and profile fields.
+    fn shows_cjk(&self) -> bool {
+        let avatar = self.shared.snapshot.lock().avatar_name.clone();
+        let profiles = self.shared.calibrations.lock().profiles.keys().any(|name| has_cjk(name));
+        profiles
+            || [avatar.as_deref().unwrap_or_default(), self.search.as_str(), self.profile_name.as_str()]
+                .into_iter()
+                .any(has_cjk)
+            || self.cameras.iter().any(|c| has_cjk(&c.name))
+            || self.shared.gpus.iter().any(|g| has_cjk(&g.name))
     }
 
     fn t(&self, s: &Settings, key: &str) -> &'static str {
@@ -358,9 +375,20 @@ impl eframe::App for App {
             }
         }
 
-        if self.font_language != s.language {
-            load_fonts(&ctx, s.language);
-            self.font_language = s.language;
+        if ctx.input(|i| i.viewport().minimized == Some(true)) {
+            // Nothing is seen; a slow tick keeps the saving going.
+            self.shared.ui_awake.store(false, Ordering::Relaxed);
+            ctx.request_repaint_after(Duration::from_secs(1));
+            self.persist();
+            return;
+        }
+        self.shared.ui_focused.store(ctx.input(|i| i.viewport().focused != Some(false)), Ordering::Relaxed);
+
+        // Once loaded, the CJK fonts stay: reloading costs more than keeping them.
+        let cjk = self.fonts.1 || s.language.is_cjk() || self.cjk_wanted.get() || self.shows_cjk();
+        if self.fonts != (s.language, cjk) {
+            load_fonts(&ctx, s.language, cjk);
+            self.fonts = (s.language, cjk);
         }
 
         let style_key = (s.scheme, s.custom_colors, s.interface_scale);
